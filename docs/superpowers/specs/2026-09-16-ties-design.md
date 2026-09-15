@@ -30,12 +30,14 @@ Everything stays on the Mac: one SQLite file, no server, no account. Research re
 | Semantic search | `NLContextualEmbedding` (macOS 14+) mean-pooled per profile; cosine over all rows in memory |
 | HTML parsing | SwiftSoup |
 | Networking | `URLSession` with a browser-like User-Agent, per-host throttle, disk cache |
+| Web search | Off-screen `WKWebView` loading DuckDuckGo (default, keyless). Verified 2026-09-16: bare `URLSession` requests to DuckDuckGo, Brave and Mojeek get bot challenges or 403, Bing returns junk; a real WebKit view returns full results on the first try. Optional keyed backends: Tavily, Exa |
 | Phone parsing | `PhoneNumberKit` for E.164 normalisation and digit search |
 | Secrets | API keys in the login Keychain via `Security` framework, never in the DB |
-| Updates | Sparkle 2, appcast on GitHub Pages |
+| Updates | No Sparkle (needs a signing identity to be safe). "Check for Updates…" compares the running version with the latest GitHub release tag and opens the release page |
+| Dependencies | Exactly three: GRDB.swift 7.11, SwiftSoup 2.13, PhoneNumberKit 4.3 |
 | Sandbox | **Off.** Hardened runtime on. Entitlements: `com.apple.security.personal-information.addressbook`, `com.apple.security.network.client`. Sandbox off is required to run `claude`, `codex`, `gemini` CLIs and to detect local runners |
 | Signing | Ad-hoc (`-`) signature. README documents "right-click → Open" on first launch. If a Developer ID appears later, only `project.yml` and the release workflow change |
-| Preferences | `@AppStorage` + `Defaults` package for typed keys |
+| Preferences | `@AppStorage` |
 | Tests | XCTest via `swift test` for the core package; UI tested manually |
 
 ### Package layout
@@ -91,13 +93,14 @@ evidence                          -- why a candidate scored what it did
 source_page                       -- fetched/collected text per candidate
   id, candidateId, url, title, snippet, bodyText, fetchedAt, kind ('gravatar'|'github'|'serp'|'page'|'username')
 
-profile                           -- AI-extracted, one per accepted candidate (or per person for manual)
-  personId PK, occupation, summary, companies JSON, achievements JSON, certificates JSON,
-  experience JSON, canHelpWith JSON (tags), confidence REAL, providerId, model, extractedAt
-  embedding BLOB NULL
+profile                           -- AI-extracted, one per person
+  personId PK, facts JSON (ProfileFacts: occupation, summary, companies[], achievements[],
+  certificates[], experience[], canHelpWith[]), confidence REAL, providerId, model, extractedAt
+  embedding BLOB NULL             -- [Float32] little-endian
 
-profile_fts (FTS5)                -- displayName, occupation, summary, companies, achievements,
-                                  -- certificates, experience, canHelpWith, notes; synced by triggers
+profile_fts (FTS5, contentless)   -- personId UNINDEXED, content TEXT
+                                  -- content = displayName + organization + jobTitle + every ProfileFacts
+                                  -- string + note body; rewritten by Store whenever profile or note changes
 
 note                              -- user-written, per person, Markdown
   personId PK, body, updatedAt
@@ -141,7 +144,7 @@ Order per person:
    - Gravatar Profiles API: `GET https://api.gravatar.com/v3/profiles/{sha256(email)}` → name, job title, company, location, verified accounts, avatar. Unauth limit 100/h; optional key in Settings.
    - GitHub: `GET /search/commits?q=author-email:{email}` → login; `GET /users/{login}` → name, company, blog, location. Unauth 60/h (search 10/min); optional PAT in Settings.
    - Each hit becomes a candidate with `email_hash` evidence, weight high enough to auto-accept if nothing conflicts.
-2. **Search snippets (DuckDuckGo HTML endpoint)** `GET https://html.duckduckgo.com/html/?q=` with 2–3 s spacing and jittered backoff on HTTP 202/403. Queries:
+2. **Search snippets** through a `SearchBackend` protocol. Default `WebKitSearchBackend`: one off-screen `WKWebView` (main actor, serial, 2.5 s spacing, 25 s timeout) loads `https://duckduckgo.com/?ia=web&q=…` and reads `[data-testid="result"]` rows (`a[data-testid="result-title-a"]` for URL/title, `[data-result="snippet"]` for snippet) with `evaluateJavaScript`, polling once a second until rows exist. If a bot challenge appears (no rows after 12 polls) the backend pauses 5 minutes and reports "Waiting for DuckDuckGo…". Optional keyed backends `TavilySearchBackend` (`POST https://api.tavily.com/search`) and `ExaSearchBackend` (`POST https://api.exa.ai/search`). Queries:
    - `"First Last" "Company"` (if company known)
    - `"First Last" site:linkedin.com/in`
    - `"First Last" site:github.com`, `site:x.com`, `site:twitter.com`
@@ -174,7 +177,11 @@ Chunking: source text is split into ≤2,500-token chunks; each chunk produces a
 `ProviderSpec` catalogue (static, ships in the app):
 
 ```swift
-enum Transport { case appleFoundation, openAIChat, anthropic, gemini, ollama, claudeCLI, codexCLI, geminiCLI }
+// Gemini, Groq, OpenRouter, Mistral, DeepSeek, xAI, Perplexity, Fireworks, Together, Cloudflare,
+// Hugging Face, SambaNova, Ollama (/v1), LM Studio, llama.cpp, MLX, Jan and GPT4All all speak the
+// OpenAI chat-completions protocol, so one client covers them. Anthropic has its own; the three CLIs
+// shell out; Apple is in-process.
+enum Transport { case appleFoundation, openAIChat, anthropic, claudeCLI, codexCLI, geminiCLI }
 enum Tier { case onDevice, freeCloud, cli, local, paidCloud, custom }
 struct ProviderSpec: Identifiable {
   let id: String; let name: String; let logo: String; let transport: Transport; let tier: Tier
@@ -198,7 +205,7 @@ Logos: SVG/PNG from `lobehub/icons-static-svg` and `simple-icons` in `Ties/Resou
 - **List column**: search field in the toolbar (placeholder "Search or ask…"). Typing filters by name/company/phone digits instantly. Return, or a leading `?`, runs a "who can help" query. Letter section headers when unfiltered; ranked results with a one-line highlighted "why" when querying. `+` button bottom-left (New Person). Rows: 40pt photo · name · occupation grey.
 - **Detail**: 96pt photo, name, occupation · company, confidence pill and "Sources" text. Pill actions: Message (`sms:`/`imessage:`), Call (`tel:`), FaceTime (`facetime:`), Mail (`mailto:`), Share (`ShareLink` with vCard + profile summary). Sections: Contacts fields (read-only), Researched (Can help with chips, summary with source dots, Work / Education / Achievements / Certificates disclosure groups, each fact with a link icon to its source), Yours (Notes Markdown, tags). Bottom-right: Refresh (re-run scan+extract), Edit (inline edit of researched fields and manual people). Header icon `person.crop.circle.badge.questionmark` opens the candidate picker.
 - **Search ranking**: FTS5 BM25 over `profile_fts` and cosine over `embedding`, fused by reciprocal rank fusion (k=60). Top 50 shown. Optional Settings toggle "Let AI re-rank top 10 with a reason" (off by default, keeps search instant).
-- **Settings** (`Settings` scene, tabs): General (database path, size, Export JSON/CSV, Delete Everything), Providers (same grid + keys), Research (throttles, optional Gravatar/GitHub/Exa/Tavily keys), Updates (Sparkle).
+- **Settings** (`Settings` scene, tabs): General (database path, size, Export JSON, Delete Everything, Check for Updates…), Providers (same grid + keys), Research (search backend picker, optional Gravatar/GitHub/Exa/Tavily keys).
 
 Animations: `.snappy` for list changes, `matchedGeometryEffect` for photo from row to detail, symbol effects (`.bounce`) on grant/success, skeleton shimmer while rows fill.
 
@@ -224,7 +231,7 @@ Everything lives in one SQLite file in `~/Library/Application Support/Ties`. Tie
 
 ## 12. Distribution
 
-`release.yml` on tag `v*`: xcodegen → `xcodebuild archive` (ad-hoc sign) → `create-dmg` → GitHub Release with `Ties.dmg` → `generate_appcast` → push `appcast.xml` to `gh-pages` → bump cask in `asim/homebrew-ties`. README explains: `brew install --cask 1-800-casualme/ties/ties` or download the DMG and right-click → Open once.
+`release.yml` on tag `v*`: xcodegen → `xcodebuild archive` (ad-hoc sign) → `hdiutil` DMG → GitHub Release with `Ties.dmg`. README explains: download the DMG, drag to Applications, right-click → Open once (unsigned build). A Homebrew tap (`1-800-casualme/homebrew-ties`) is a follow-up once the first release exists.
 
 ## 13. Build order (milestones)
 
@@ -234,4 +241,4 @@ Everything lives in one SQLite file in `~/Library/Application Support/Ties`. Tie
 4. Scanner: probes, scoring, candidate picker, Scan + Review screens.
 5. Provider catalogue, detection, Apple on-device + OpenAI-compatible + Claude CLI clients, provider screen, Extract screen.
 6. Main window: three columns, search fusion, actions, add/edit, settings.
-7. Release pipeline, README, logos, Sparkle.
+7. Release pipeline, README, logos, update check.
