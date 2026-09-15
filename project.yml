@@ -1,0 +1,52 @@
+name: Ties
+options:
+  bundleIdPrefix: com.asim
+  deploymentTarget:
+    macOS: "15.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+packages:
+  TiesCore:
+    path: TiesCore
+targets:
+  Ties:
+    type: application
+    platform: macOS
+    sources:
+      - path: Ties
+        excludes: ["Info.plist", "Ties.entitlements"]
+    dependencies:
+      - package: TiesCore
+        product: TiesCore
+    info:
+      path: Ties/Info.plist
+      properties:
+        CFBundleDisplayName: Ties
+        CFBundleName: Ties
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSMinimumSystemVersion: "15.0"
+        LSApplicationCategoryType: public.app-category.productivity
+        NSContactsUsageDescription: Ties reads your contacts to build profiles you can search.
+        NSHumanReadableCopyright: MIT License
+        NSPrincipalClass: NSApplication
+        NSSupportsAutomaticTermination: false
+    entitlements:
+      path: Ties/Ties.entitlements
+      properties:
+        com.apple.security.personal-information.addressbook: true
+        com.apple.security.network.client: true
+    settings:
+      base:
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: 1
+        PRODUCT_BUNDLE_IDENTIFIER: com.asim.ties
+        ENABLE_HARDENED_RUNTIME: YES
+        ENABLE_APP_SANDBOX: NO
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "-"
+        DEVELOPMENT_TEAM: ""
+        OTHER_LDFLAGS: ["-weak_framework", "FoundationModels"]
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
