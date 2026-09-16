@@ -71,7 +71,7 @@ private struct GeneralSettingsView: View {
                         .foregroundStyle(.secondary)
                 }
             } footer: {
-                Text("Exporting writes every person, their contact details, profile, and note to one file. Deleting empties the database and starts setup again.")
+                Text("Exporting writes every person, their contact details, profile, and note to one file. Deleting empties the database, throws away the cached pages and the saved keys, and starts setup again.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -99,7 +99,7 @@ private struct GeneralSettingsView: View {
             Button("Delete Everything", role: .destructive, action: deleteEverything)
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Every person, profile, note, and researched page is removed from this Mac. This can't be undone.")
+            Text("Every person, profile, note, researched page, cached download and saved API key is removed from this Mac. This can't be undone.")
         }
     }
 
@@ -160,19 +160,16 @@ private struct GeneralSettingsView: View {
         }
     }
 
-    /// Empties the database and drops the app back into setup — with nothing in it, the main
-    /// window has nothing to show and the wizard is the only sensible screen.
+    /// Erases the database, the Keychain items, the page cache and the settings, and drops the
+    /// app back into setup — with nothing left, the main window has nothing to show and the
+    /// wizard is the only sensible screen. `AppModel.deleteEverything()` does the work, and
+    /// stops anything still running before it starts.
     ///
-    /// Everything still running is stopped first. A scan or a search started before this point
-    /// is reading rows that are about to go, and would otherwise finish by writing candidates,
-    /// profiles, or a note about people who no longer exist.
+    /// The size row is re-read afterwards: the database has been vacuumed, and a Size that still
+    /// reported the old file would say the deletion hadn't happened.
     private func deleteEverything() {
-        model.cancelAllWork()
         do {
-            try model.store.deleteEverything()
-            model.selectedPersonId = nil
-            model.resumeWizardStep = nil
-            model.hasCompletedSetup = false
+            try model.deleteEverything()
             message = "Everything deleted."
             refreshSize()
         } catch {

@@ -28,6 +28,12 @@ final class WizardState {
 
     var scanProgress = ScanProgress(completed: 0, total: 0)
     var extractProgress = ScanProgress(completed: 0, total: 0)
+    /// When each run in flight started, which is what the "about 4 min left" in its caption is
+    /// measured from. Beside the progress rather than on the screen watching it, so a screen
+    /// rebuilt mid-run — or one that picks up a run it didn't start — still has the beginning
+    /// of it to measure from.
+    var scanStartedAt: Date?
+    var extractStartedAt: Date?
     var selectedForExtract: Set<String> = []
     /// The runs in flight, held here rather than on the screens watching them: a screen that is
     /// rebuilt must not start a second run over people the first one is already working through,

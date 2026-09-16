@@ -51,7 +51,7 @@ struct DoneView: View {
                     .controlSize(.large)
                     .disabled(unsure == 0)
 
-                PrimaryButton("Start searching") { model.hasCompletedSetup = true }
+                PrimaryButton("Start searching", action: startSearching)
             }
         }
         .padding(40)
@@ -97,6 +97,14 @@ struct DoneView: View {
             errorMessage = error.localizedDescription
             appeared = true
         }
+    }
+
+    /// Into the app, and out of setup for good. `resumeWizardStep` is cleared alongside the
+    /// flag because it describes the trip that has just ended: left set, the next thing to
+    /// reopen the wizard would drop the user back at the Contacts step rather than the start.
+    private func startSearching() {
+        model.resumeWizardStep = nil
+        model.hasCompletedSetup = true
     }
 
     /// Back to Review, three steps up the wizard rather than one, so the pills that say which

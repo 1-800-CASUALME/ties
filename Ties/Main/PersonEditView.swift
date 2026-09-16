@@ -8,6 +8,12 @@ import TiesCore
 /// Anything typed here is the user's own answer, so the profile it writes is attributed to
 /// `"manual"` at full confidence — it was not guessed by a provider and should not be shown as
 /// if it were.
+///
+/// A person who came from the address book is a partial exception. Their name, company, title
+/// and channels are a mirror of a Contacts card: `upsertPeople` matches on `cnIdentifier` and
+/// overwrites every one of those columns on the next sync, so an edit made here would be
+/// reverted without a word the next time "Add more contacts…" is used. Those fields are shown
+/// read-only for them, and only the profile — which Contacts knows nothing about — is written.
 struct PersonEditView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
@@ -47,49 +53,21 @@ struct PersonEditView: View {
         var value = ""
     }
 
+    /// Whether Contacts owns this person's name and channels — true for anyone synced from the
+    /// address book, false for a manual person and for the new one this form adds.
+    private var isManagedByContacts: Bool {
+        person?.source == .contacts
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             Form {
-                Section("Name") {
-                    TextField("First", text: $givenName)
-                    TextField("Last", text: $familyName)
-                    TextField("Company", text: $organization)
-                    TextField("Title", text: $jobTitle)
-                }
-
-                Section("Contact") {
-                    ForEach($rows) { $row in
-                        HStack(spacing: 8) {
-                            Picker("Kind", selection: $row.kind) {
-                                Text("Phone").tag(Channel.Kind.phone)
-                                Text("Email").tag(Channel.Kind.email)
-                                Text("URL").tag(Channel.Kind.url)
-                            }
-                            .labelsHidden()
-                            .frame(width: 90)
-
-                            TextField("Label", text: $row.label)
-                                .frame(width: 80)
-
-                            TextField(placeholder(row.kind), text: $row.value)
-
-                            Button {
-                                rows.removeAll { $0.id == row.id }
-                            } label: {
-                                Image(systemName: "minus.circle")
-                            }
-                            .buttonStyle(.borderless)
-                            .help("Remove")
-                            .accessibilityLabel("Remove")
-                        }
-                    }
-
-                    Button {
-                        rows.append(ChannelRow())
-                    } label: {
-                        Label("Add", systemImage: "plus.circle")
-                    }
-                    .buttonStyle(.borderless)
+                if isManagedByContacts {
+                    managedNameSection
+                    managedContactSection
+                } else {
+                    nameSection
+                    contactSection
                 }
 
                 Section {
@@ -127,6 +105,121 @@ struct PersonEditView: View {
         }
         .frame(minWidth: 480, minHeight: 560)
         .onAppear(perform: load)
+    }
+
+    // MARK: - Sections
+
+    private var nameSection: some View {
+        Section("Name") {
+            TextField("First", text: $givenName)
+            TextField("Last", text: $familyName)
+            TextField("Company", text: $organization)
+            TextField("Title", text: $jobTitle)
+        }
+    }
+
+    private var contactSection: some View {
+        Section("Contact") {
+            ForEach($rows) { $row in
+                HStack(spacing: 8) {
+                    Picker("Kind", selection: $row.kind) {
+                        Text("Phone").tag(Channel.Kind.phone)
+                        Text("Email").tag(Channel.Kind.email)
+                        Text("URL").tag(Channel.Kind.url)
+                    }
+                    .labelsHidden()
+                    .frame(width: 90)
+
+                    TextField("Label", text: $row.label)
+                        .frame(width: 80)
+
+                    TextField(placeholder(row.kind), text: $row.value)
+
+                    Button {
+                        rows.removeAll { $0.id == row.id }
+                    } label: {
+                        Image(systemName: "minus.circle")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Remove")
+                    .accessibilityLabel("Remove")
+                }
+            }
+
+            Button {
+                rows.append(ChannelRow())
+            } label: {
+                Label("Add", systemImage: "plus.circle")
+            }
+            .buttonStyle(.borderless)
+        }
+    }
+
+    /// The Contacts mirror, shown rather than offered: the whole name as the card spells it,
+    /// then only the parts that are filled in, so a card with no title doesn't grow an empty
+    /// row that looks like something to type into.
+    private var managedNameSection: some View {
+        Section {
+            LabeledContent("Name", value: person?.displayName ?? "")
+            if !organization.isEmpty {
+                LabeledContent("Company", value: organization)
+            }
+            if !jobTitle.isEmpty {
+                LabeledContent("Title", value: jobTitle)
+            }
+        } header: {
+            Text("Name")
+        } footer: {
+            Label("Managed by Contacts — edit them in the Contacts app", systemImage: "person.crop.circle")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var managedContactSection: some View {
+        Section {
+            if storedRows.isEmpty {
+                Text("No phone, email, or website on this card.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(storedRows) { row in
+                LabeledContent {
+                    Text(row.value)
+                        .textSelection(.enabled)
+                } label: {
+                    Label(row.label.isEmpty ? kindName(row.kind) : row.label, systemImage: symbol(row.kind))
+                }
+            }
+        } header: {
+            Text("Contact")
+        } footer: {
+            Text("The next sync with Contacts replaces these, so Ties doesn't edit them here.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    /// The channel rows that hold something. `load()` leaves one blank row behind for the
+    /// editable form to type into; read-only, that row is nothing at all.
+    private var storedRows: [ChannelRow] {
+        rows.filter { !$0.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    }
+
+    private func kindName(_ kind: Channel.Kind) -> String {
+        switch kind {
+        case .phone: "Phone"
+        case .email: "Email"
+        case .url: "Website"
+        }
+    }
+
+    private func symbol(_ kind: Channel.Kind) -> String {
+        switch kind {
+        case .phone: "phone"
+        case .email: "envelope"
+        case .url: "link"
+        }
     }
 
     private func placeholder(_ kind: Channel.Kind) -> String {
@@ -177,6 +270,20 @@ struct PersonEditView: View {
 
     private func save() {
         guard !loadFailed else { return }
+
+        // Contacts owns their name and their channels, and there is nothing on screen that
+        // could have changed either; writing them back would only restamp `updatedAt` on a row
+        // the next sync is going to rewrite anyway.
+        if isManagedByContacts, let person {
+            do {
+                try saveProfile(for: person.id)
+                onSave(person.id)
+                dismiss()
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+            return
+        }
 
         let given = givenName.trimmingCharacters(in: .whitespacesAndNewlines)
         let family = familyName.trimmingCharacters(in: .whitespacesAndNewlines)

@@ -38,6 +38,7 @@ struct ExtractView: View {
         VStack(spacing: 0) {
             ProgressCaptionView(
                 progress: state.extractProgress,
+                startedAt: state.extractStartedAt,
                 onCancel: stop,
                 paused: false,
                 showsPause: false
@@ -133,6 +134,7 @@ struct ExtractView: View {
             return
         }
         state.extractor = extractor
+        state.extractStartedAt = .now
 
         for await progress in await extractor.run(personIds: pending) {
             guard !Task.isCancelled else { return }
