@@ -34,8 +34,10 @@ public enum CandidateGrouper {
 
         let canonicalURLs = findings.map { ProbeFinding.canonical($0.url) }
         let canonicalLinked = findings.map { $0.linkedURLs.map(ProbeFinding.canonical) }
-        let usernames = findings.map { $0.username?.lowercased() }
-        let avatars = findings.map(\.avatarURL)
+        // An empty string isn't a real username/avatar URL, so it's treated as absent — two
+        // findings that both merely have a blank field shouldn't be merged as if they matched.
+        let usernames = findings.map { nonEmpty($0.username)?.lowercased() }
+        let avatars = findings.map { nonEmpty($0.avatarURL) }
 
         for i in 0..<n {
             for j in (i + 1)..<n {
@@ -72,5 +74,12 @@ public enum CandidateGrouper {
         }
 
         return rootOrder.compactMap { groupsByRoot[$0] }
+    }
+
+    /// `nil` for `nil` or an empty string, so callers can treat a blank field the same as an
+    /// absent one.
+    private static func nonEmpty(_ s: String?) -> String? {
+        guard let s, !s.isEmpty else { return nil }
+        return s
     }
 }

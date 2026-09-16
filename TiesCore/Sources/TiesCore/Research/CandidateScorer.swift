@@ -78,8 +78,17 @@ public enum CandidateScorer {
     private static let dedupedKindOrder: [Evidence.Kind] = [.emailHash, .phone, .company, .location, .avatar, .username, .name]
 
     public static func score(groups: [[ProbeFinding]], input: ProbeInput, weights: ScoringWeights = .default) -> [ScoredCandidate] {
-        var results = groups.compactMap { scoreGroup($0, input: input, weights: weights) }
-        results.sort { $0.candidate.score > $1.candidate.score }
+        // Pair each scored candidate with its original group index before sorting, so that
+        // candidates tying on score keep a deterministic order (first-appearing group wins)
+        // instead of depending on the sort algorithm's incidental stability.
+        var indexed: [(index: Int, scored: ScoredCandidate)] = []
+        for (index, group) in groups.enumerated() {
+            if let scored = scoreGroup(group, input: input, weights: weights) {
+                indexed.append((index: index, scored: scored))
+            }
+        }
+        indexed.sort { (-$0.scored.candidate.score, $0.index) < (-$1.scored.candidate.score, $1.index) }
+        var results = indexed.map(\.scored)
 
         let autoIndices = results.indices.filter { results[$0].candidate.status == .auto }
         if autoIndices.count > 1 {
@@ -111,7 +120,11 @@ public enum CandidateScorer {
         }
 
         // Field priority: gravatar -> github -> serp(LinkedIn first) -> serp -> page -> username.
-        let ordered = group.sorted { priorityRank($0) < priorityRank($1) }
+        // Tie-break on the original index so findings of equal rank keep their original
+        // relative order deterministically, instead of relying on `sorted`'s incidental stability.
+        let ordered = group.enumerated()
+            .sorted { (priorityRank($0.element), $0.offset) < (priorityRank($1.element), $1.offset) }
+            .map(\.element)
         let displayName = ordered.lazy.compactMap(\.displayName).first
         let headline = ordered.lazy.compactMap(\.headline).first
         let groupCompany = ordered.lazy.compactMap(\.company).first
@@ -124,8 +137,12 @@ public enum CandidateScorer {
         }
 
         // Derived: company agrees with (or conflicts with) the contact's known company.
+        // Normalized (case/diacritic/punctuation-insensitive) before comparing: raw jaroWinkler
+        // on strings differing only in case (e.g. "ACME CORP" vs "acme corp") can score well
+        // under 0.9 and even under 0.5, which would otherwise manufacture a false conflict for
+        // the very same company.
         if let inputCompany = input.company, let groupCompany {
-            let similarity = NameMatcher.jaroWinkler(inputCompany, groupCompany)
+            let similarity = NameMatcher.jaroWinkler(NameMatcher.normalize(inputCompany), NameMatcher.normalize(groupCompany))
             if similarity >= 0.9 {
                 if kept[.company] == nil {
                     kept[.company] = EvidenceItem(kind: .company, weight: weights.company, detail: "Company matches: \(groupCompany)", sourceURL: nil)
@@ -135,13 +152,16 @@ public enum CandidateScorer {
             }
         }
 
-        // Derived: two findings in the group share a username on different hosts.
-        if kept[.username] == nil, sharedAcrossHosts(group, value: { $0.username?.lowercased() }) {
+        // Derived: two findings in the group share a username on different hosts. An empty
+        // string isn't a real username, so it's excluded to avoid two findings with a blank
+        // `username` field falsely "sharing" one.
+        if kept[.username] == nil, sharedAcrossHosts(group, value: { nonEmpty($0.username)?.lowercased() }) {
             kept[.username] = EvidenceItem(kind: .username, weight: weights.username, detail: "Shared username across profiles", sourceURL: nil)
         }
 
-        // Derived: two findings in the group share an avatar URL on different hosts.
-        if kept[.avatar] == nil, sharedAcrossHosts(group, value: \.avatarURL) {
+        // Derived: two findings in the group share an avatar URL on different hosts. Same
+        // empty-string guard as username above.
+        if kept[.avatar] == nil, sharedAcrossHosts(group, value: { nonEmpty($0.avatarURL) }) {
             kept[.avatar] = EvidenceItem(kind: .avatar, weight: weights.avatar, detail: "Shared avatar across profiles", sourceURL: nil)
         }
 
@@ -242,6 +262,13 @@ public enum CandidateScorer {
             }
         }
         return false
+    }
+
+    /// `nil` for `nil` or an empty string, so callers can treat a blank field the same as an
+    /// absent one.
+    private static func nonEmpty(_ s: String?) -> String? {
+        guard let s, !s.isEmpty else { return nil }
+        return s
     }
 
     private static func host(of url: String) -> String? {
