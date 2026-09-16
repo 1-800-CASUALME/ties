@@ -1,0 +1,11 @@
+.superpowers/
+build/
+DerivedData/
+*.xcodeproj
+*.xcworkspace
+.build/
+.swiftpm/
+xcuserdata/
+.DS_Store
+Ties/Info.plist
+Ties/Ties.entitlements

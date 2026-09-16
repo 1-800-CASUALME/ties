@@ -1,0 +1,12 @@
+name: CI
+on: [push, pull_request]
+jobs:
+  build:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      # Newest Xcode on the runner: the Apple on-device provider needs the macOS 26 SDK.
+      - run: sudo xcode-select -s "$(ls -d /Applications/Xcode_26*.app /Applications/Xcode_16*.app 2>/dev/null | sort -V | tail -1)" && xcodebuild -version
+      - run: brew install xcodegen
+      - run: make test
+      - run: make build

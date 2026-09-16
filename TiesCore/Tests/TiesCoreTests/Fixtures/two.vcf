@@ -1,0 +1,17 @@
+BEGIN:VCARD
+VERSION:3.0
+N:Ahmed;Sara;;;
+FN:Sara Ahmed
+ORG:Acme;
+TITLE:Head of Growth
+EMAIL;type=WORK:sara@acme.com
+TEL;type=CELL:+1 (555) 010-0100
+URL:https://sara.dev
+END:VCARD
+BEGIN:VCARD
+VERSION:3.0
+N:;;;;
+FN:Beta Corp
+ORG:Beta Corp;
+TEL:+966501234567
+END:VCARD
