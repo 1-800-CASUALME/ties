@@ -13,6 +13,8 @@ public actor Extractor {
     private let provider: any AIProvider
     private let embedder: any Embedder
     private let concurrency: Int
+    /// The §7.6 second pass, or `nil` when fact-checking is off.
+    private let factChecker: FactChecker?
 
     private var cancelled = false
     private var continuation: AsyncStream<ScanProgress>.Continuation?
@@ -23,11 +25,21 @@ public actor Extractor {
     private var completed = 0
     private var total = 0
 
-    public init(store: Store, provider: any AIProvider, embedder: any Embedder, concurrency: Int = 2) {
+    /// `factCheck` adds the §7.6 pass: every extracted fact is re-read against the pages it
+    /// cites and marked supported or not before the profile is saved. It costs one extra model
+    /// call per person, which is why it is opt-in.
+    public init(
+        store: Store,
+        provider: any AIProvider,
+        embedder: any Embedder,
+        concurrency: Int = 2,
+        factCheck: Bool = false
+    ) {
         self.store = store
         self.provider = provider
         self.embedder = embedder
         self.concurrency = concurrency
+        self.factChecker = factCheck ? FactChecker(provider: provider) : nil
     }
 
     /// Starts extracting `personIds` and returns immediately with a stream of progress events.
@@ -147,7 +159,15 @@ public actor Extractor {
 
             let channels = try store.channels(personId: personId)
             let input = ExtractionInput(person: person, channels: channels, pages: pages)
-            let facts = try await provider.extract(input)
+            var facts = try await provider.extract(input)
+
+            // The fact check runs on the merged facts, before they are embedded and saved, so
+            // the profile lands already marked. A checker that fails is not worth failing the
+            // extraction over: the facts are still good, they are just still unchecked
+            // (`supported == nil`), and the next run can check them again.
+            if let factChecker {
+                facts = (try? await factChecker.check(facts, pages: pages)) ?? facts
+            }
 
             let confidence = pages.isEmpty ? 0.3 : min(1.0, 0.4 + 0.1 * Double(pages.count))
 
