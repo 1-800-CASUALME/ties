@@ -335,8 +335,29 @@ final class AppModel {
             ))
         }
         probes.append(PageFetchProbe(maxPages: mode.pagesFetched))
-        return ResearchScanner(store: store, probes: probes, client: http)
+        return ResearchScanner(store: store, probes: probes, client: http, concurrency: scanConcurrency)
     }
+
+    /// How many people are researched at once.
+    ///
+    /// The web-view engine runs one DuckDuckGo query at a time — that is what the single
+    /// `WKWebView` behind it can do — so people scanned in parallel queue up behind each
+    /// other's searches and more of them buys nothing. Tavily and Exa are HTTP calls that
+    /// genuinely overlap, so a wider batch is a wider batch.
+    private var scanConcurrency: Int {
+        searchRunsOneAtATime ? 4 : 6
+    }
+
+    /// Whether the engine actually in use searches one query at a time. Read off the backend
+    /// that was built rather than the saved id, because an engine whose key has gone missing
+    /// falls back to DuckDuckGo underneath and is every bit as serial as the choice that says
+    /// DuckDuckGo.
+    var searchRunsOneAtATime: Bool {
+        searchBackend.id == AppModel.serialBackendId
+    }
+
+    /// The id `WebKitSearchBackend` reports.
+    private static let serialBackendId = "duckduckgo"
 
     func makeExtractor() throws -> Extractor {
         Extractor(store: store, provider: try makeProvider(), embedder: embedder)

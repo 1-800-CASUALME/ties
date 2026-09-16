@@ -47,15 +47,24 @@ struct ScanView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 12) {
-                Spacer()
-                ScanModePicker(mode: modeBinding)
-                    .labelsHidden()
-                    .fixedSize()
-                engineMenu
+            VStack(alignment: .trailing, spacing: 2) {
+                HStack(spacing: 12) {
+                    Spacer()
+                    ScanModePicker(mode: modeBinding)
+                        .labelsHidden()
+                        .fixedSize()
+                    engineMenu
+                }
+                if model.searchRunsOneAtATime {
+                    Text("DuckDuckGo runs one search at a time. Tavily or Exa are several times faster.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .transition(.opacity)
+                }
             }
             .padding(.horizontal, 20)
             .padding(.bottom, 6)
+            .animation(.snappy, value: model.searchRunsOneAtATime)
 
             ProgressCaptionView(
                 progress: state.scanProgress,
