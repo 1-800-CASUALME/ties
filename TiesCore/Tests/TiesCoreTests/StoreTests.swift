@@ -87,3 +87,38 @@ private func makeStore() throws -> Store { try Store.inMemory() }
     try s.enqueue(kind: .scan, personIds: ["a"])
     #expect(try s.jobs(kind: .scan).first { $0.personId == "a" }?.state == .queued)
 }
+
+@Test func renamingAPersonReindexesThem() throws {
+    let s = try makeStore()
+    var p = Person(givenName: "Sara", familyName: "Ahmed", organization: "Acme")
+    try s.upsertPeople([p], channels: [])
+    #expect(try s.ftsSearch("Ahmed").map(\.personId) == [p.id])
+
+    p.familyName = "Khalil"
+    p.displayName = "Sara Khalil"
+    p.organization = "Beta"
+    try s.updatePerson(p, channels: [])
+    #expect(try s.ftsSearch("Ahmed").isEmpty)
+    #expect(try s.ftsSearch("Acme").isEmpty)
+    #expect(try s.ftsSearch("Khalil").map(\.personId) == [p.id])
+    #expect(try s.ftsSearch("Beta").map(\.personId) == [p.id])
+}
+
+@Test func manualPersonWithNoProfileIsSearchableByName() throws {
+    let s = try makeStore()
+    let p = Person(givenName: "Yusuf", familyName: "Haddad", organization: "Cedar Labs", source: .manual)
+    try s.insertManualPerson(p, channels: [])
+    #expect(try s.ftsSearch("Haddad").map(\.personId) == [p.id])
+    #expect(try s.ftsSearch("Cedar").map(\.personId) == [p.id])
+}
+
+@Test func resyncReindexesAChangedOrganization() throws {
+    let s = try makeStore()
+    let p = Person(cnIdentifier: "cn-fts", givenName: "Omar", familyName: "Nasser", organization: "Acme")
+    try s.upsertPeople([p], channels: [])
+    var p2 = p; p2.id = UUID().uuidString; p2.organization = "Northwind"
+    try s.upsertPeople([p2], channels: [])
+    let stored = try s.allPeople()[0]
+    #expect(try s.ftsSearch("Acme").isEmpty)
+    #expect(try s.ftsSearch("Northwind").map(\.personId) == [stored.id])
+}

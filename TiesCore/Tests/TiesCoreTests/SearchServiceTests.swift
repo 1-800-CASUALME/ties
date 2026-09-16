@@ -48,3 +48,21 @@ import Foundation
     #expect(r.first?.personId == sara.id)
     #expect(r.first?.why == facts.occupation)
 }
+
+@Test func askKeywordHalfSurvivesStopWords() async throws {
+    let store = try Store.inMemory(); let e = HashEmbedder()
+    let sara = Person(givenName: "Sara", familyName: "Ahmed")
+    try store.upsertPeople([sara], channels: [])
+    let facts = ProfileFacts(occupation: "Growth marketer")
+    // Stored without an embedding on purpose: `allEmbeddings` skips her, so the semantic half
+    // of the fusion is empty and only the keyword half can return her.
+    try store.upsertProfile(Profile(personId: sara.id, facts: facts, confidence: 1, providerId: "x", model: nil, extractedAt: .now, embedding: nil))
+
+    // FTS5 ANDs every token prefix, so the raw question matches nobody: passing it through
+    // verbatim is what killed the keyword half.
+    #expect(try store.ftsSearch("who can help with growth").isEmpty)
+    #expect(try store.ftsSearch("growth").map(\.personId) == [sara.id])
+
+    let s = SearchService(store: store, embedder: e)
+    #expect(try await s.ask("who can help with growth").map(\.personId) == [sara.id])
+}

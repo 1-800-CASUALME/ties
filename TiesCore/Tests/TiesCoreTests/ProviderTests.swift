@@ -47,6 +47,53 @@ import Foundation
     #expect(try await p.extractChunk(system: "s", user: "u").occupation == "Pilot")
 }
 
+@Test func codexCLIProviderRunsWithoutTools() async throws {
+    let facts = #"{"occupation":"Pilot","companies":[],"achievements":[],"certificates":[],"experience":[],"canHelpWith":[]}"#
+    let p = CodexCLIProvider(spec: ProviderCatalog.spec("codex-cli")!, executable: "/fake/codex") { exe, args, stdin in
+        #expect(exe == "/fake/codex")
+        #expect(args.first == "exec")
+        #expect(stdin == nil)
+        // The scraped page text is untrusted, so the shell is sandboxed read-only, the user's
+        // config (and with it their MCP servers) is not loaded, and web search is off.
+        #expect(args.contains("--sandbox")); #expect(args.contains("read-only"))
+        #expect(args.contains("--ignore-user-config"))
+        #expect(args.contains("--ephemeral"))
+        #expect(args.contains("tools.web_search=false"))
+        #expect(args.contains("mcp_servers={}"))
+        #expect(args.last?.hasPrefix("Do not use any tools") == true)
+        return CLIRunResult(stdout: facts, stderr: "", status: 0)
+    }
+    #expect(try await p.extractChunk(system: "s", user: "u").occupation == "Pilot")
+}
+
+@Test func geminiCLIProviderDeniesEveryToolByPolicy() async throws {
+    let facts = #"{"occupation":"Pilot","companies":[],"achievements":[],"certificates":[],"experience":[],"canHelpWith":[]}"#
+    let p = GeminiCLIProvider(spec: ProviderCatalog.spec("gemini-cli")!, executable: "/fake/gemini") { exe, args, stdin in
+        #expect(exe == "/fake/gemini")
+        #expect(stdin == nil)
+        #expect(args.contains("-p")); #expect(args.contains("--output-format")); #expect(args.contains("json"))
+        // The CLI has no "no tools" flag, so tools are denied through its policy engine.
+        let policyIndex = try #require(args.firstIndex(of: "--policy"))
+        let policy = try String(contentsOf: URL(fileURLWithPath: args[policyIndex + 1]), encoding: .utf8)
+        #expect(policy.contains(#"toolName = "*""#))
+        #expect(policy.contains(#"decision = "deny""#))
+        #expect(args.contains { $0.hasPrefix("Do not use any tools") })
+        return CLIRunResult(stdout: #"{"response":"\#(facts.replacingOccurrences(of: "\"", with: "\\\""))"}"#, stderr: "", status: 0)
+    }
+    #expect(try await p.extractChunk(system: "s", user: "u").occupation == "Pilot")
+}
+
+@Test func geminiCLIProviderRemovesItsPolicyFile() async throws {
+    nonisolated(unsafe) var policyPath: String?
+    let p = GeminiCLIProvider(spec: ProviderCatalog.spec("gemini-cli")!, executable: "/fake/gemini") { _, args, _ in
+        policyPath = args.firstIndex(of: "--policy").map { args[$0 + 1] }
+        return CLIRunResult(stdout: #"{"response":"{}"}"#, stderr: "", status: 0)
+    }
+    _ = try? await p.extractChunk(system: "s", user: "u")
+    let path = try #require(policyPath)
+    #expect(!FileManager.default.fileExists(atPath: path))
+}
+
 @Test func cliRunnerRunsRealProcess() async throws {
     let r = try await CLIRunner.run(executable: "/bin/echo", arguments: ["hi"], stdin: nil)
     #expect(r.stdout.trimmingCharacters(in: .whitespacesAndNewlines) == "hi"); #expect(r.status == 0)

@@ -220,7 +220,7 @@ Animations: `.snappy` for list changes, `matchedGeometryEffect` for photo from r
 
 ## 10. Privacy stance (shipped in README and Welcome → Privacy link)
 
-Everything lives in one SQLite file in `~/Library/Application Support/Ties`. Ties never uploads contacts; research goes straight from this Mac to public endpoints or to an AI provider you choose with your own key. Any person, fact, or the whole database can be deleted instantly. Ties prefers official APIs and search snippets, fetches public pages one at a time, never logs in anywhere, and never writes to Apple Contacts.
+Everything lives in one SQLite file in `~/Library/Application Support/Ties`. Ties never uploads your address book. Research goes straight from this Mac to public endpoints; during extraction, one person's name, company, title and email addresses are sent to the AI provider you chose with your own key — or stay on this Mac with Apple Intelligence. Any person, fact, or the whole database can be deleted instantly. Ties prefers official APIs and search snippets, fetches public pages one at a time, never logs in anywhere, and never writes to Apple Contacts.
 
 ## 11. Testing
 

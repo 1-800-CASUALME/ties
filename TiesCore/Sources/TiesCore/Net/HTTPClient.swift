@@ -22,7 +22,19 @@ public enum HTTPError: Error, Sendable {
 
 public protocol HTTPClient: Sendable {
     func get(_ url: URL, headers: [String: String]) async throws -> HTTPResponse
+    /// As `get`, but with `bypassCache: true` the response must come from the network: no
+    /// cached body is returned and the fresh one is not stored. Liveness checks need this —
+    /// a cached 200 would keep reporting a stopped local server as running.
+    func get(_ url: URL, headers: [String: String], bypassCache: Bool) async throws -> HTTPResponse
     func post(_ url: URL, headers: [String: String], body: Data) async throws -> HTTPResponse
+}
+
+extension HTTPClient {
+    /// A client with no cache of its own has nothing to bypass, so the flag defaults to being
+    /// ignored and every existing conformer keeps compiling unchanged.
+    public func get(_ url: URL, headers: [String: String], bypassCache: Bool) async throws -> HTTPResponse {
+        try await get(url, headers: headers)
+    }
 }
 
 public enum HTTPDefaults {
@@ -52,14 +64,26 @@ public final class URLSessionHTTPClient: HTTPClient {
     }
 
     public func get(_ url: URL, headers: [String: String]) async throws -> HTTPResponse {
+        try await get(url, headers: headers, bypassCache: false)
+    }
+
+    public func get(_ url: URL, headers: [String: String], bypassCache: Bool) async throws -> HTTPResponse {
         let cacheKey = url.absoluteString
-        if let cache, let cached = cache.get(cacheKey) {
+        if !bypassCache, let cache, let cached = cache.get(cacheKey) {
             return HTTPResponse(status: 200, headers: [:], body: cached)
         }
 
-        let response = try await send(url: url, method: "GET", headers: headers, body: nil)
+        let response = try await send(
+            url: url,
+            method: "GET",
+            headers: headers,
+            body: nil,
+            // Skip URLSession's own cache too, so bypassing means "ask the server", not
+            // "ask the other cache".
+            cachePolicy: bypassCache ? .reloadIgnoringLocalAndRemoteCacheData : .useProtocolCachePolicy
+        )
 
-        if response.status == 200, let cache {
+        if !bypassCache, response.status == 200, let cache {
             cache.set(cacheKey, response.body)
         }
         return response
@@ -69,11 +93,17 @@ public final class URLSessionHTTPClient: HTTPClient {
         try await send(url: url, method: "POST", headers: headers, body: body)
     }
 
-    private func send(url: URL, method: String, headers: [String: String], body: Data?) async throws -> HTTPResponse {
+    private func send(
+        url: URL,
+        method: String,
+        headers: [String: String],
+        body: Data?,
+        cachePolicy: URLRequest.CachePolicy = .useProtocolCachePolicy
+    ) async throws -> HTTPResponse {
         let host = url.host ?? url.absoluteString
         await throttle.waitTurn(host: host)
 
-        var request = URLRequest(url: url, timeoutInterval: timeout)
+        var request = URLRequest(url: url, cachePolicy: cachePolicy, timeoutInterval: timeout)
         request.httpMethod = method
         request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         for (field, value) in headers {

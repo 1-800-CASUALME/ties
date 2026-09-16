@@ -50,6 +50,22 @@ import Foundation
     #expect(!pro.contains { $0.cat == "xx NSFW xx" })
 }
 
+@Test func wmnProfessionalSitesAreProbeableAndProfessional() throws {
+    let d = try WMNDataset.bundled()
+    let pro = d.professionalSites()
+    // Every entry must actually take a username; three dataset entries point at constant
+    // API endpoints, and probing those just re-fetches one URL per candidate username.
+    #expect(pro.allSatisfy { $0.uriCheck.contains("{account}") })
+    // 7 Cups is an emotional-support service that the old alphabetical padding pulled in.
+    #expect(!pro.contains { $0.name.lowercased().contains("7cup") })
+    #expect(!pro.contains { $0.name == "LeetCode" })   // no {account} in its uri_check
+    #expect(pro.contains { $0.name == "GitHub" && $0.uriCheck.contains("github.com") })
+    // The curated names fill the default limit by themselves, so nothing is pulled in by
+    // category: the last entry is the last curated name, not whatever sorts first.
+    #expect(pro.last?.name == "Bugcrowd")
+    #expect(d.professionalSites(limit: 5).count == 5)
+}
+
 @Test func usernameProbeVerifiesTitle() async throws {
     let site = WMNSite(name: "Dribbble", uriCheck: "https://dribbble.com/{account}", eCode: 200, eString: " | Dribbble", mString: "(404)</title>", mCode: 404, cat: "art")
     let http = FakeHTTP()
@@ -98,3 +114,4 @@ import Foundation
     #expect(f[0].bodyText?.contains("Acme") == true)
     #expect(!http.requested.contains { $0.contains("linkedin") })
 }
+

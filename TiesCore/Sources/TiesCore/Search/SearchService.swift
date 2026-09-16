@@ -48,8 +48,14 @@ public struct SearchService: Sendable {
     /// embedding cosine similarity via reciprocal rank fusion.
     public func ask(_ query: String, limit: Int = 50) async throws -> [SearchResult] {
         let cleaned = Self.strip(query)
+        let tokens = Self.queryTokens(cleaned)
 
-        let keyword = try store.ftsSearch(cleaned, limit: 50).map(\.personId)
+        // `ftsSearch` ANDs every token prefix, so handing it the raw query lets a single stop
+        // word ("who can help with growth") match nothing and leave the fusion cosine-only.
+        // Search the significant tokens instead, falling back to the raw query when the user
+        // typed nothing but stop words or short tokens.
+        let keywordQuery = tokens.isEmpty ? cleaned : tokens.joined(separator: " ")
+        let keyword = try store.ftsSearch(keywordQuery, limit: 50).map(\.personId)
 
         var semantic: [String] = []
         if let queryVector = try? await embedder.embed(cleaned) {
@@ -73,7 +79,6 @@ public struct SearchService: Sendable {
         guard !fused.isEmpty else { return [] }
 
         let profiles = try store.profilesByPerson()
-        let tokens = Self.queryTokens(cleaned)
 
         return try fused.prefix(limit).map { entry in
             SearchResult(personId: entry.id, score: entry.score, why: try why(personId: entry.id, tokens: tokens, profiles: profiles))

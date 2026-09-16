@@ -52,27 +52,54 @@ public struct WMNDataset: Sendable {
         return WMNDataset(sites: file.sites)
     }
 
-    /// Categories worth checking for a professional-identity research pass. Excludes
-    /// (among others) "xx NSFW xx", "dating", and "gaming".
-    private static let allowedCategories: Set<String> = [
-        "social", "coding", "tech", "business", "art", "blog", "news", "finance", "music",
-    ]
+    /// The WMN categories that describe how somebody works, and so qualify a site for a
+    /// research pass on their own, without being one of the curated `priorityNames`.
+    ///
+    /// The dataset's other categories are deliberately not here. "social" (its largest, 202
+    /// entries) is where regional networks, political networks and 7 Cups — an
+    /// emotional-support service — live; "hobby", "gaming", "dating", "health", "shopping",
+    /// "music", "images", "video", "art", "news", "finance", "political", "misc",
+    /// "archived" and "xx NSFW xx" are likewise about someone's private life, not their
+    /// profession. Sites in those categories are probed only when they are a curated name
+    /// (Behance, Medium, Mastodon and the like are hand-picked exceptions).
+    private static let professionalCategories: Set<String> = ["coding", "tech", "business"]
+
+    /// Categories a curated name is not allowed to match either, so a future dataset rename
+    /// can't slip one of these in through a prefix match.
+    private static let neverProfessional: Set<String> = ["xx NSFW xx", "dating", "gaming", "health"]
 
     /// Canonical display names, in priority order: sites most likely to carry a professional
     /// identity come first. Matched case-insensitively (ignoring punctuation/spacing) against
     /// `WMNSite.name`.
+    ///
+    /// Long enough to fill the default `limit` on its own, so the categories below rarely
+    /// have to supply anything for the bundled dataset — a deliberate name beats whatever
+    /// happens to sort first.
     private static let priorityNames: [String] = [
         "GitHub", "GitLab", "Medium", "Dev.to", "Behance", "Dribbble", "Stack Overflow", "Kaggle",
         "Product Hunt", "Substack", "Mastodon", "Hacker News", "Docker Hub", "npm", "PyPI",
         "Codepen", "Replit", "HackerRank", "LeetCode", "Speaker Deck", "SlideShare", "Vimeo",
         "YouTube", "Flickr", "500px", "About.me", "Linktree", "Keybase", "Gravatar", "WordPress",
+        "Xing", "ResearchGate", "Bitbucket", "Codeberg", "SourceForge", "Figma", "CodeSandbox",
+        "freeCodeCamp", "RubyGems", "Codeforces", "Codewars", "Bugcrowd",
     ]
 
-    /// The sites to run a username probe against: the fixed `priorityNames` first (one match
-    /// each, renamed to their canonical display name), then the remaining allowed-category
-    /// sites alphabetically, capped at `limit`.
+    /// The sites to run a username probe against: one dataset entry per `priorityNames`
+    /// entry first (renamed to its canonical display name), then whatever else is filed under
+    /// `professionalCategories`, capped at `limit`.
+    ///
+    /// The tail used to be drawn from *every* allowed category, alphabetically, which is how
+    /// each contact's usernames came to be probed against 7 Cups (an emotional-support
+    /// service), a Russian social network, a Polish political network and several anime
+    /// trackers. It is now confined to the categories that describe someone's work.
+    ///
+    /// Entries whose `uriCheck` has no `{account}` placeholder are dropped throughout: three
+    /// of them (LeetCode, AniList, Anime-Planet) point at constant API endpoints, so
+    /// "probing" them just re-fetched one fixed URL per candidate username.
     public func professionalSites(limit: Int = 40) -> [WMNSite] {
-        let pool = sites.filter { Self.allowedCategories.contains($0.cat) }
+        let pool = sites.filter {
+            $0.uriCheck.contains("{account}") && !Self.neverProfessional.contains($0.cat)
+        }
         var usedNames = Set<String>()
         var result: [WMNSite] = []
 
@@ -87,10 +114,11 @@ public struct WMNDataset: Sendable {
             result.append(renamed)
         }
 
-        let remaining = pool
-            .filter { !usedNames.contains($0.name) }
-            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-        result.append(contentsOf: remaining)
+        for site in pool where !usedNames.contains(site.name) && Self.professionalCategories.contains(site.cat) {
+            guard result.count < limit else { break }
+            usedNames.insert(site.name)
+            result.append(site)
+        }
 
         return Array(result.prefix(limit))
     }
