@@ -59,9 +59,10 @@ final class FakeHTTP: HTTPClient, @unchecked Sendable {
 }
 
 /// Builds a `ProbeInput` for a person with the given name, emails, urls, and company.
-func input(name: (String, String), emails: [String] = [], urls: [String] = [], company: String? = nil) -> ProbeInput {
+func input(name: (String, String), emails: [String] = [], urls: [String] = [], company: String? = nil, phones: [String] = []) -> ProbeInput {
     let p = Person(givenName: name.0, familyName: name.1, organization: company)
     var ch = emails.map { Channel(personId: p.id, kind: .email, label: nil, value: $0, normalized: $0) }
     ch += urls.map { Channel(personId: p.id, kind: .url, label: nil, value: $0, normalized: $0) }
+    ch += phones.map { Channel(personId: p.id, kind: .phone, label: nil, value: $0, normalized: $0) }
     return ProbeInput(person: p, channels: ch)
 }
