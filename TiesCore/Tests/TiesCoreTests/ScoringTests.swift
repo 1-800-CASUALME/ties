@@ -150,3 +150,15 @@ private func finding(_ url: String, name: String? = nil, company: String? = nil,
     #expect(s[0].candidate.score == 4.5)
     #expect(s[1].candidate.score == 3)
 }
+
+@Test func nameOnlySearchHitSurfacesAsUnsure() {
+    // A contact with just a name and a phone: the only thing research can find is a page whose
+    // name matches. That must still reach the review screen as an "Unsure" candidate.
+    let i = input(name: ("Sara", "Ahmed"))
+    let hit = finding("https://linkedin.com/in/sara-ahmed", name: "Sara Ahmed",
+                      evidence: [EvidenceItem(kind: .name, weight: 0, detail: "Search result")])
+    let s = CandidateScorer.score(groups: [[hit]], input: i)
+    #expect(s.count == 1)
+    #expect(s.first?.candidate.status == .pending)
+    #expect(s.first?.candidate.score == ScoringWeights.default.name)
+}

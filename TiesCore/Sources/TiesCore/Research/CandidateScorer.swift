@@ -9,6 +9,9 @@ public struct ScoringWeights: Sendable {
     public var location: Double
     public var avatar: Double
     public var username: Double
+    /// A page or profile whose name matches the contact. Small on its own — a namesake is
+    /// still a namesake — but enough to surface the candidate as "Unsure" for a human to judge.
+    public var name: Double
     public var conflict: Double
     public var autoThreshold: Double
     public var pendingThreshold: Double
@@ -20,9 +23,10 @@ public struct ScoringWeights: Sendable {
         location: Double = 1.5,
         avatar: Double = 2.0,
         username: Double = 1.5,
+        name: Double = 1.0,
         conflict: Double = -3.0,
         autoThreshold: Double = 6.0,
-        pendingThreshold: Double = 2.0
+        pendingThreshold: Double = 1.0
     ) {
         self.emailHash = emailHash
         self.phone = phone
@@ -30,6 +34,7 @@ public struct ScoringWeights: Sendable {
         self.location = location
         self.avatar = avatar
         self.username = username
+        self.name = name
         self.conflict = conflict
         self.autoThreshold = autoThreshold
         self.pendingThreshold = pendingThreshold
@@ -38,7 +43,7 @@ public struct ScoringWeights: Sendable {
     public static let `default` = ScoringWeights()
 
     /// The weight this scorer assigns evidence of `kind`, regardless of what weight the probe
-    /// that produced it supplied. `.name` evidence never contributes to the score.
+    /// that produced it supplied.
     func weight(for kind: Evidence.Kind) -> Double {
         switch kind {
         case .emailHash: return emailHash
@@ -48,7 +53,7 @@ public struct ScoringWeights: Sendable {
         case .avatar: return avatar
         case .username: return username
         case .conflict: return conflict
-        case .name: return 0
+        case .name: return name
         }
     }
 }
