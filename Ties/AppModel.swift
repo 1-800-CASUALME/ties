@@ -104,6 +104,9 @@ final class AppModel {
         let embedder = NLContextualEmbedder()
 
         self.defaults = defaults
+        // A database that had to be moved aside is empty now; run setup again rather than
+        // dropping the user into a main window with nobody in it.
+        if opened.movedAside { defaults.set(false, forKey: Keys.hasCompletedSetup) }
         self.store = opened.store
         self.storeFailure = opened.failure
         self.http = http
@@ -127,22 +130,22 @@ final class AppModel {
     /// got, and a message for `RootView` to show. This used to be a `fatalError`: a corrupt
     /// file, a failed migration or a full disk meant a crash on every launch, with nothing said
     /// and no way to reach Settings.
-    private static func openStore() -> (store: Store, failure: String?) {
+    private static func openStore() -> (store: Store, failure: String?, movedAside: Bool) {
         let url = Store.defaultURL
         do {
-            return (try Store.open(at: url), nil)
+            return (try Store.open(at: url), nil, false)
         } catch {
             let firstError = error
             do {
                 try moveDatabaseAside(url)
-                return (try Store.open(at: url), nil)
+                return (try Store.open(at: url), nil, true)
             } catch {
                 let failure = """
                     Ties couldn't open \(url.path), and couldn't move it aside to start over.
 
                     \(firstError.localizedDescription)
                     """
-                return (placeholderStore(), failure)
+                return (placeholderStore(), failure, true)
             }
         }
     }

@@ -170,7 +170,7 @@ struct PersonEditView: View {
         } header: {
             Text("Name")
         } footer: {
-            Label("Managed by Contacts — edit them in the Contacts app", systemImage: "person.crop.circle")
+            Label("Imported from your contacts — the next sync overwrites these, so change them at the source", systemImage: "person.crop.circle")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
