@@ -38,10 +38,22 @@ struct ScanView: View {
     /// the moment the user starts to wonder whether anything is running.
     @State private var showsHint = false
     @State private var paused = false
+    /// Set when the engine changes under a running scan: the stream is stopped, and the run loop
+    /// starts a fresh scanner over whoever is left instead of moving the wizard on.
+    @State private var restartRequested = false
+    /// The engine the user picked that has no key yet, which the sheet is asking for.
+    @State private var askingKeyFor: SearchBackendChoice?
     @State private var errorMessage: String?
 
     var body: some View {
         VStack(spacing: 0) {
+            HStack {
+                Spacer()
+                engineMenu
+            }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 6)
+
             ProgressCaptionView(
                 progress: state.scanProgress,
                 startedAt: state.scanStartedAt,
@@ -88,6 +100,56 @@ struct ScanView: View {
         .padding(.top, 24)
         .task { await scan() }
         .task { await waitForFirstEvent() }
+        .sheet(item: $askingKeyFor) { choice in
+            SearchBackendKeySheet(choice: choice) { useIt in
+                askingKeyFor = nil
+                if useIt { switchTo(choice.id) }
+            }
+        }
+    }
+
+    // MARK: - Which engine
+
+    /// The engine the research searches with, changeable here rather than only in Settings: the
+    /// moment it is obviously not working is while watching it not work.
+    private var engineMenu: some View {
+        Menu {
+            ForEach(SearchBackendChoice.all) { choice in
+                Button { choose(choice) } label: {
+                    if choice.id == model.searchBackendId {
+                        Label(choice.name, systemImage: "checkmark")
+                    } else {
+                        Text(choice.name)
+                    }
+                }
+            }
+        } label: {
+            Label(SearchBackendChoice.named(model.searchBackendId).name, systemImage: "globe")
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Which engine the research searches with")
+        .accessibilityLabel("Search engine")
+    }
+
+    /// An engine that needs a key we haven't got asks for it first; a switch that quietly fell
+    /// back to DuckDuckGo would look like the menu had done nothing at all.
+    private func choose(_ choice: SearchBackendChoice) {
+        guard choice.id != model.searchBackendId else { return }
+        guard choice.hasKey else {
+            askingKeyFor = choice
+            return
+        }
+        switchTo(choice.id)
+    }
+
+    /// Saves the engine and starts the run again with it, over whoever hasn't been researched
+    /// yet — the people already done were found with the old engine, and are done either way.
+    private func switchTo(_ id: String) {
+        model.setSearchBackend(id)
+        restartRequested = true
+        paused = false
+        Task { await state.scanner?.cancel() }
     }
 
     /// Puts the hint up if the scanner hasn't said anything within three seconds, and leaves it
@@ -138,22 +200,34 @@ struct ScanView: View {
 
         guard state.scanner == nil else { return }
 
-        let scanner = model.makeScanner()
-        state.scanner = scanner
-        state.scanStartedAt = .now
-
-        for await progress in await scanner.run(personIds: scanOrder) {
-            guard !Task.isCancelled else { return }
-            state.scanProgress = progress
-            refresh(progress)
-        }
-
-        // Cleared whether the run finished on its own or the user stopped it, so nothing later
-        // mistakes a spent scanner for one still working.
-        state.scanner = nil
+        await runUntilDone()
 
         guard !Task.isCancelled else { return }
         state.next()
+    }
+
+    /// One scanner per pass over the people still to research. Changing the engine stops the
+    /// scanner, which ends the stream, and the loop comes round with a new one built from the
+    /// engine that was just chosen — rather than the wizard moving on as it would for any other
+    /// stopped run.
+    private func runUntilDone() async {
+        repeat {
+            restartRequested = false
+            let scanner = model.makeScanner()
+            state.scanner = scanner
+            state.scanStartedAt = .now
+
+            for await progress in await scanner.run(personIds: pendingOrder) {
+                guard !Task.isCancelled else { return }
+                state.scanProgress = progress
+                refresh(progress)
+            }
+
+            // Cleared whether the run finished on its own or the user stopped it, so nothing
+            // later mistakes a spent scanner for one still working.
+            state.scanner = nil
+            guard !Task.isCancelled else { return }
+        } while restartRequested && !pendingOrder.isEmpty
     }
 
     /// Whether every selected person already has a scan job that has started — so this batch has
@@ -172,6 +246,14 @@ struct ScanView: View {
     /// couldn't be read, so a failed list load can't silently scan nobody.
     private var scanOrder: [String] {
         people.isEmpty ? Array(state.selectedIds) : people.map(\.id)
+    }
+
+    /// Who is actually left: anyone whose scan job isn't already `.done`. A person researched on
+    /// an earlier visit — or before the engine was changed — has candidates already, and paying
+    /// for them twice is the one thing a restart must not do. A job that failed or was skipped is
+    /// worth another try, which is exactly what a different engine is for.
+    private var pendingOrder: [String] {
+        scanOrder.filter { jobStates[$0] != .done }
     }
 
     private func pause() {

@@ -244,24 +244,27 @@ private struct ProviderSettingsView: View {
 
 /// Which engine the research searches with, and the optional keys that make the probes better.
 private struct ResearchSettingsView: View {
-    @AppStorage("searchBackend") private var searchBackend = "duckduckgo"
+    @Environment(AppModel.self) private var model
+
+    /// Writes straight through the model, which saves the id and rebuilds the backend the next
+    /// scan will use — the same path the Scan screen's engine menu takes.
+    private var backend: Binding<String> {
+        Binding(
+            get: { model.searchBackendId },
+            set: { model.setSearchBackend($0) }
+        )
+    }
 
     var body: some View {
         Form {
             Section {
-                Picker("Search with", selection: $searchBackend) {
-                    Text("DuckDuckGo").tag("duckduckgo")
-                    Text("Tavily").tag("tavily")
-                    Text("Exa").tag("exa")
-                }
-                if searchBackend == "tavily" {
-                    KeyField(title: "Tavily key", account: "tavily")
-                }
-                if searchBackend == "exa" {
-                    KeyField(title: "Exa key", account: "exa")
+                SearchBackendPicker(backend: backend) { _ in
+                    // A key typed after the engine was chosen: rebuild, or the engine would be
+                    // selected and still searching with DuckDuckGo underneath.
+                    model.setSearchBackend(model.searchBackendId)
                 }
             } footer: {
-                Text("DuckDuckGo needs no key and is used whenever the chosen engine has none. Changing the engine takes effect the next time Ties starts.")
+                Text("DuckDuckGo needs no key and is used whenever the chosen engine has none. Changing the engine takes effect on the next research run.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -278,26 +281,5 @@ private struct ResearchSettingsView: View {
             }
         }
         .formStyle(.grouped)
-    }
-}
-
-/// One Keychain-backed secret. Written through as it is typed, and removed when emptied, so
-/// there is nothing to save and no way to leave a stale key behind.
-private struct KeyField: View {
-    let title: String
-    let account: String
-
-    @State private var value = ""
-
-    var body: some View {
-        SecureField(title, text: $value)
-            .onChange(of: account, initial: true) { value = Keychain.get(account: account) ?? "" }
-            .onChange(of: value) { _, key in
-                if key.isEmpty {
-                    Keychain.delete(account: account)
-                } else {
-                    try? Keychain.set(key, account: account)
-                }
-            }
     }
 }

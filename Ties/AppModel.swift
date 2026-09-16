@@ -28,7 +28,13 @@ final class AppModel {
     /// empty the one the app is actually using rather than a second handle on the same folder.
     let cache: DiskCache
     let contacts = ContactsService()
-    let searchBackend: any SearchBackend
+    /// What the research searches the web with. A `var` because the engine can be changed while
+    /// the app is running — from Settings, or from the Scan screen mid-run — and `makeScanner()`
+    /// reads whatever is here at the moment it builds a scanner.
+    private(set) var searchBackend: any SearchBackend
+    /// The chosen engine's id: "duckduckgo", "tavily" or "exa". Held as well as written to
+    /// `UserDefaults` so the pickers showing it redraw when it changes.
+    private(set) var searchBackendId: String
 
     /// Why the database on disk couldn't be opened, if it couldn't. `nil` in every normal case
     /// — including the one where an unopenable file was moved aside and a fresh one opened in
@@ -113,6 +119,7 @@ final class AppModel {
         self.cache = cache
         self.embedder = embedder
         self.searchBackend = AppModel.makeSearchBackend(defaults: defaults, client: http)
+        self.searchBackendId = defaults.string(forKey: Keys.searchBackend) ?? "duckduckgo"
         self.setupCompleted = defaults.bool(forKey: Keys.hasCompletedSetup)
         self.providerId = defaults.string(forKey: Keys.selectedProviderId)
     }
@@ -271,6 +278,8 @@ final class AppModel {
         defaults.removeObject(forKey: Keys.hasCompletedSetup)
 
         providerId = nil
+        searchBackendId = "duckduckgo"
+        searchBackend = AppModel.makeSearchBackend(defaults: defaults, client: http)
         setupCompleted = false
         detections = [:]
         selectedPersonId = nil
@@ -363,6 +372,15 @@ final class AppModel {
     }
 
     // MARK: - Search backend
+
+    /// Saves the chosen engine and rebuilds the backend around it, so the next scanner searches
+    /// with it. An engine whose key is missing still falls back to DuckDuckGo underneath, which
+    /// is why the pickers ask for the key before they get here.
+    func setSearchBackend(_ id: String) {
+        defaults.set(id, forKey: Keys.searchBackend)
+        searchBackendId = id
+        searchBackend = AppModel.makeSearchBackend(defaults: defaults, client: http)
+    }
 
     /// DuckDuckGo via an off-screen web view unless the user picked an API-key backend and
     /// actually has a key for it.
