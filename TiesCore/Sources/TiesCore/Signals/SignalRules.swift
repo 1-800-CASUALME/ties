@@ -149,13 +149,18 @@ public enum SignalRules {
         // company rather than a place.
         var expectingCompany = false
 
-        for line in block {
+        // The block line that carried the person's name, so a title line next to it is read as
+        // theirs; -1 is the delimiter line itself, immediately above the block.
+        var nameLine: Int? = delimiterIsSenderName ? -1 : nil
+
+        for (index, line) in block.enumerated() {
             var rest = line
-            for url in line.matches(of: urlPattern).map({ String($0.output) }) {
-                if let canonical = canonicalLink(trimmingTrailingPunctuation(url)), !links.contains(canonical) {
+            for candidate in linkCandidates(in: line) {
+                if let canonical = canonicalLink(trimmingTrailingPunctuation(candidate.url)),
+                   !links.contains(canonical) {
                     links.append(canonical)
                 }
-                rest = rest.replacingOccurrences(of: url, with: " ")
+                rest = rest.replacingOccurrences(of: candidate.text, with: " ")
             }
             for raw in rest.matches(of: phonePattern).map({ String($0.output) }) {
                 guard let e164 = PhoneNormalizer.e164(raw, defaultRegion: "SA")
@@ -169,29 +174,38 @@ public enum SignalRules {
             guard !remainder.isEmpty else { continue }
             if let sender, remainder.caseInsensitiveCompare(sender) == .orderedSame {
                 name = sender
+                nameLine = index
                 continue
             }
 
             // "Sara Ahmed, Cardiologist at King Faisal Hospital": a leading person name only
             // counts as one when what follows still parses as title + company.
             var subject = remainder
-            if name == nil, let comma = remainder.firstIndex(of: ",") {
+            if let comma = remainder.firstIndex(of: ",") {
                 let head = String(remainder[..<comma]).trimmingCharacters(in: .whitespaces)
                 let afterComma = String(remainder[remainder.index(after: comma)...])
                     .trimmingCharacters(in: .whitespaces)
                 if looksLikePersonName(head), titleAndCompany(in: afterComma) != nil {
-                    name = head
+                    if name == nil { name = head }
+                    nameLine = index
                     subject = afterComma
                 }
             }
 
-            if let parsed = titleAndCompany(in: subject) {
+            // A separator alone does not make a title: "Katherine at Acme" is a person and a
+            // place, not a job. Keep the parse when the title names a profession, or when this
+            // line sits right under the person's own name, which is where titles live.
+            if let parsed = titleAndCompany(in: subject),
+               containsProfession(parsed.title) || nameLine == index || nameLine == index - 1 {
                 if !titles.contains(parsed.title) { titles.append(parsed.title) }
                 if !companies.contains(parsed.company) { companies.append(parsed.company) }
                 expectingCompany = false
             } else if containsProfession(subject) {
                 if !titles.contains(subject) { titles.append(subject) }
                 expectingCompany = true
+            } else if name == nil, !expectingCompany, looksLikePersonName(subject) {
+                name = subject
+                nameLine = index
             } else if expectingCompany, subject.count <= 60 {
                 if !companies.contains(subject) { companies.append(subject) }
                 expectingCompany = false
@@ -215,18 +229,32 @@ public enum SignalRules {
     // MARK: - Links
 
     /// The canonical identity URLs in `text`: `linkedin.com/in/…`, `x.com`, `twitter.com` and
-    /// `github.com` profiles, plus any other `https` URL whose path is at most two segments
-    /// deep. Tracking query strings are dropped and hosts are lowercased, deduped in first-seen
-    /// order.
+    /// `github.com` profiles — written with a scheme or without one, as they are in chat — plus
+    /// any other `https` URL whose path is at most two segments deep. Tracking query strings are
+    /// dropped and hosts are lowercased, deduped in first-seen order.
     public static func links(in text: String) -> [String] {
         var found: [String] = []
-        for match in text.matches(of: urlPattern) {
-            guard let canonical = canonicalLink(trimmingTrailingPunctuation(String(match.output))),
+        for candidate in linkCandidates(in: text) {
+            guard let canonical = canonicalLink(trimmingTrailingPunctuation(candidate.url)),
                   !found.contains(canonical)
             else { continue }
             found.append(canonical)
         }
         return found
+    }
+
+    /// Every link mention in `text`, in the order they appear: full `http(s)` URLs, plus bare
+    /// `linkedin.com/in/…`-style mentions of the known identity hosts, which people write
+    /// without a scheme. `text` is the substring as written, `url` the same with a scheme.
+    private static func linkCandidates(in text: String) -> [(text: String, url: String)] {
+        var candidates = text.matches(of: urlPattern).map { ($0.range, String($0.output), String($0.output)) }
+        for match in text.matches(of: schemelessIdentityPattern) {
+            let mention = String(match.output.1)
+            candidates.append((match.range, mention, "https://" + mention))
+        }
+        return candidates
+            .sorted { $0.0.lowerBound < $1.0.lowerBound }
+            .map { (text: $0.1, url: $0.2) }
     }
 
     // MARK: - Patterns
@@ -239,7 +267,19 @@ public enum SignalRules {
     nonisolated(unsafe) private static let titleCaseRun = #/[A-Z][a-z'’\-]+(?:\s+[A-Z][a-z'’\-]+)*/#
     nonisolated(unsafe) private static let handlePattern = #/[@+][A-Za-z0-9._\-]{2,}/#
     nonisolated(unsafe) private static let locationPattern = #/^[A-Z][a-z]+(,\s*[A-Z][a-z ]+)?$/#
-    nonisolated(unsafe) private static let titlePattern = #/^(?<title>[^|,@]{3,60}?)\s*(\||,|at|@|-|–)\s*(?<company>[^|,]{2,60})$/#
+    // Separators need their own whitespace, or "Senator" splits into "Sen" / "or" and "Chief Cat
+    // Officer" splits inside "Cat": `at` and the dashes must stand alone between spaces, a pipe
+    // or comma must carry whitespace on at least one side, and only `@` may sit flush against
+    // both. The title is lazy, so the separator nearest the start of the line wins, and the
+    // alternatives are listed in the order they are preferred at any one position.
+    nonisolated(unsafe) private static let titlePattern =
+        #/^(?<title>[^|,@]{3,60}?)(?:\s+\|\s*|\|\s+|\s*,\s+|\s+[-–]\s+|\s+[Aa][Tt]\s+|\s*@\s*)(?<company>[^|,]{2,60})$/#
+
+    /// The same identity hosts as `identityHosts`, written without a scheme the way people
+    /// mention them in chat. The leading boundary keeps this off the tail of a full URL.
+    nonisolated(unsafe) private static let schemelessIdentityPattern =
+        #/(?:^|[\s(,;])((?:www\.)?(?:linkedin\.com|x\.com|twitter\.com|github\.com)/[^\s<>"')\]]+)/#
+            .ignoresCase()
     nonisolated(unsafe) private static let signOffMarker =
         #/^(--\s?|regards|best|thanks|kind regards|cheers|sincerely|تحياتي|مع التحية)\p{P}*$/#.ignoresCase()
 
@@ -329,9 +369,13 @@ public enum SignalRules {
         return (title, company)
     }
 
+    /// True when a line names a profession: an English profession word, or — since Arabic writes
+    /// the job itself where English abbreviates it — an honorific token in either language, so
+    /// "مهندسة برمجيات" reads as a title.
     private static func containsProfession(_ line: String) -> Bool {
         let words = Set(NameMatcher.normalize(line).split(separator: " ").map(String.init))
-        return !words.isDisjoint(with: Honorifics.allProfessions)
+        if !words.isDisjoint(with: Honorifics.allProfessions) { return true }
+        return line.split(whereSeparator: \.isWhitespace).contains { Honorifics.canonical(String($0)) != nil }
     }
 
     private static func trimmingTrailingPunctuation(_ url: String) -> String {

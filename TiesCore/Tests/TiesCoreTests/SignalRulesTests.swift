@@ -87,3 +87,39 @@ import Testing
     #expect(SignalRules.links(in: "https://acme.com/team/sara https://acme.com/blog/2026/09/hiring https://ACME.com/team/sara")
         == ["https://acme.com/team/sara"])
 }
+
+@Test func signatureSeparatorsNeedWordBoundaries() throws {
+    // "at" inside a word is not a separator: "Senator" must not split into "Sen" / "or".
+    let senator = try #require(
+        SignalRules.signature(in: "Best,\nSara Ahmed\nSenator\n+966 50 123 4567", senderName: "Sara Ahmed")
+    )
+    #expect(senator.titles.isEmpty)
+    #expect(senator.companies.isEmpty)
+    #expect(senator.phones == ["+966501234567"])
+
+    // Nor does it split inside "Cat"; the spaced dash is the separator.
+    let cat = try #require(
+        SignalRules.signature(in: "Best,\nSara Ahmed\nChief Cat Officer - Acme", senderName: "Sara Ahmed")
+    )
+    #expect(cat.titles == ["Chief Cat Officer"])
+    #expect(cat.companies == ["Acme"])
+
+    // A well-formed separator is not enough: a bare name is not a title.
+    #expect(SignalRules.signature(in: "Best,\nKatherine at Acme", senderName: nil) == nil)
+}
+
+@Test func parsesArabicSignature() throws {
+    let body = "شكرا على المكالمة\n\nتحياتي\nسارة أحمد\nمهندسة برمجيات | شركة أكمي"
+    let s = try #require(SignalRules.signature(in: body, senderName: nil))
+    #expect(s.titles == ["مهندسة برمجيات"])
+    #expect(s.companies == ["شركة أكمي"])
+}
+
+@Test func linksAcceptSchemelessMentions() {
+    #expect(SignalRules.links(in: "she is on linkedin.com/in/Sara-Ahmed and www.x.com/saraa")
+        == ["https://linkedin.com/in/sara-ahmed", "https://x.com/saraa"])
+    // Only the known identity hosts are picked up without a scheme.
+    #expect(SignalRules.links(in: "see acme.com/team/sara").isEmpty)
+    // A full URL is not also matched as a scheme-less mention of its own host.
+    #expect(SignalRules.links(in: "https://www.github.com/sara") == ["https://github.com/sara"])
+}
