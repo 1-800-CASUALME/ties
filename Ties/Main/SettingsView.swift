@@ -242,26 +242,56 @@ private struct ProviderSettingsView: View {
 
 // MARK: - Research
 
-/// Which engine the research searches with, and the optional keys that make the probes better.
+/// Which engine the research searches with, how deep it digs, and the optional keys that make
+/// the probes better.
 private struct ResearchSettingsView: View {
-    @AppStorage("searchBackend") private var searchBackend = "duckduckgo"
+    @Environment(AppModel.self) private var model
+
+    /// The engine the user has picked here that has no key yet, which the sheet is asking for.
+    @State private var askingKeyFor: SearchBackendChoice?
+
+    /// Reads the saved engine, and on a change takes the same path the Scan screen's menu
+    /// takes: an engine with no key is asked for one first, rather than being saved as the
+    /// choice while the research quietly carries on with DuckDuckGo underneath it.
+    private var backend: Binding<String> {
+        Binding(
+            get: { model.searchBackendId },
+            set: { choose($0) }
+        )
+    }
+
+    private func choose(_ id: String) {
+        // Re-picking the engine already running is the only no-op; re-picking the saved one
+        // while something else is actually searching is how a fallback gets put right.
+        guard id != model.searchBackendId || id != model.activeSearchBackendId else { return }
+        let choice = SearchBackendChoice.named(id)
+        guard choice.hasKey else {
+            askingKeyFor = choice
+            return
+        }
+        model.setSearchBackend(id)
+    }
+
+    private var mode: Binding<ScanMode> {
+        Binding(
+            get: { model.scanMode },
+            set: { model.setScanMode($0) }
+        )
+    }
 
     var body: some View {
         Form {
             Section {
-                Picker("Search with", selection: $searchBackend) {
-                    Text("DuckDuckGo").tag("duckduckgo")
-                    Text("Tavily").tag("tavily")
-                    Text("Exa").tag("exa")
+                SearchBackendPicker(backend: backend) { _ in
+                    // A key finished after the engine was chosen: rebuild around it, or the
+                    // engine would be selected and still searching with DuckDuckGo underneath.
+                    // A key that was just cleared rebuilds too — falling back is then the
+                    // honest thing for the backend to do, and the menu says so.
+                    model.setSearchBackend(model.searchBackendId)
                 }
-                if searchBackend == "tavily" {
-                    KeyField(title: "Tavily key", account: "tavily")
-                }
-                if searchBackend == "exa" {
-                    KeyField(title: "Exa key", account: "exa")
-                }
+                ScanModePicker(mode: mode)
             } footer: {
-                Text("DuckDuckGo needs no key and is used whenever the chosen engine has none. Changing the engine takes effect the next time Ties starts.")
+                Text("DuckDuckGo needs no key and is used whenever the chosen engine has none. Quick runs one or two searches, fifteen username sites and three pages for each person; thorough runs four searches, forty sites and every page. Both take effect on the next research run.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -278,26 +308,11 @@ private struct ResearchSettingsView: View {
             }
         }
         .formStyle(.grouped)
-    }
-}
-
-/// One Keychain-backed secret. Written through as it is typed, and removed when emptied, so
-/// there is nothing to save and no way to leave a stale key behind.
-private struct KeyField: View {
-    let title: String
-    let account: String
-
-    @State private var value = ""
-
-    var body: some View {
-        SecureField(title, text: $value)
-            .onChange(of: account, initial: true) { value = Keychain.get(account: account) ?? "" }
-            .onChange(of: value) { _, key in
-                if key.isEmpty {
-                    Keychain.delete(account: account)
-                } else {
-                    try? Keychain.set(key, account: account)
-                }
+        .sheet(item: $askingKeyFor) { choice in
+            SearchBackendKeySheet(choice: choice) { useIt in
+                askingKeyFor = nil
+                if useIt { model.setSearchBackend(choice.id) }
             }
+        }
     }
 }

@@ -6,15 +6,20 @@ import Foundation
 /// snippet as-is, with a username pulled from the URL path where applicable.
 public struct SearchProbe: Probe {
     public let id = "search"
+    public let displayName = "the web"
 
     private let backend: any SearchBackend
+    /// How many queries a person is worth; see `SearchQueryBuilder`. Defaults to `.thorough`,
+    /// which is what this probe always did.
+    private let mode: ScanMode
 
-    public init(backend: any SearchBackend) {
+    public init(backend: any SearchBackend, mode: ScanMode = .thorough) {
         self.backend = backend
+        self.mode = mode
     }
 
     public func run(_ input: ProbeInput, client: any HTTPClient) async throws -> [ProbeFinding] {
-        let queries = SearchQueryBuilder.queries(for: input)
+        let queries = SearchQueryBuilder.queries(for: input, mode: mode)
         guard !queries.isEmpty else { return [] }
 
         var findings: [ProbeFinding] = []

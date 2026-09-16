@@ -3,6 +3,7 @@ import SwiftUI
 
 /// First screen of setup: what Ties is, in one line, and what it is about to do.
 struct WelcomeView: View {
+    @Environment(AppModel.self) private var model
     @Environment(WizardState.self) private var state
     @State private var appeared = false
 
@@ -34,12 +35,27 @@ struct WelcomeView: View {
 
             Spacer()
 
-            PrimaryButton("Continue") { state.next() }
+            VStack(spacing: 10) {
+                PrimaryButton("Continue") { state.next() }
+                // Straight into the app, with nothing imported and nothing researched. The
+                // main window offers setup again while the store is empty, so this is a
+                // detour rather than a door closing.
+                Button("Skip setup", action: skip)
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
+                    .keyboardShortcut(.cancelAction)
+                    .help("Go to Ties now and set up later")
+            }
         }
         .padding(40)
         .onAppear {
             withAnimation(.snappy) { appeared = true }
         }
+    }
+
+    private func skip() {
+        model.resumeWizardStep = nil
+        model.hasCompletedSetup = true
     }
 
     /// The real app icon, so the first thing the user sees is the app itself. Falls back to a

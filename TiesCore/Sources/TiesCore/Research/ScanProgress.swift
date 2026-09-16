@@ -17,12 +17,33 @@ public struct ScanProgress: Sendable, Equatable {
     /// `true` only on the final event of the stream, once every person has finished (or the
     /// scan was cancelled and no more will be scheduled).
     public var finished: Bool
+    /// What is happening for `currentName` right now, in words for a caption: a probe's
+    /// `displayName` such as "the web" or "GitHub". `nil` between people and on the final event.
+    public var stage: String?
+    /// The probes already finished for `currentName`, in order, by `displayName`. Empty until
+    /// the first one completes; reset for every person.
+    public var finishedStages: [String]
+    /// A run-level warning worth showing above the progress, e.g. that web search has been
+    /// switched off after repeated challenges. `nil` when there is nothing to say.
+    public var notice: String?
 
-    public init(completed: Int, total: Int, currentName: String? = nil, waitingFor: String? = nil, finished: Bool = false) {
+    public init(
+        completed: Int,
+        total: Int,
+        currentName: String? = nil,
+        waitingFor: String? = nil,
+        finished: Bool = false,
+        stage: String? = nil,
+        finishedStages: [String] = [],
+        notice: String? = nil
+    ) {
         self.completed = completed
         self.total = total
         self.currentName = currentName
         self.waitingFor = waitingFor
         self.finished = finished
+        self.stage = stage
+        self.finishedStages = finishedStages
+        self.notice = notice
     }
 }

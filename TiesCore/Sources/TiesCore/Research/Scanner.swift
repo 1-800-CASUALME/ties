@@ -8,6 +8,10 @@ import Foundation
 /// still in progress is rejected with an immediate, single-event stream rather than disturbing
 /// the active run.
 public actor Scanner {
+    /// Shown once the search backend has challenged twice in a row and web search is off for
+    /// the rest of the run.
+    public static let searchSkippedNotice = "The search engine is blocking searches, so the rest of this run skips the web. Switch engine or research again later."
+
     private let store: Store
     private let probes: [any Probe]
     private let client: any HTTPClient
@@ -19,6 +23,11 @@ public actor Scanner {
 
     private var paused = false
     private var cancelled = false
+    /// Consecutive backend challenges per probe in this run. After `maxChallenges` that probe
+    /// is skipped for the remaining people instead of stalling every one of them.
+    private var challenges: [String: Int] = [:]
+    private let maxChallenges = 2
+    private var skippedProbes: Set<String> = []
     private var continuation: AsyncStream<ScanProgress>.Continuation?
     /// The `Task` running the active `execute(personIds:)`. Kept so a run in progress is
     /// visible/trackable beyond just the continuation; `run(personIds:)` is rejected while this
@@ -33,7 +42,7 @@ public actor Scanner {
         client: any HTTPClient,
         weights: ScoringWeights = .default,
         concurrency: Int = 4,
-        challengeBackoff: Duration = .seconds(300)
+        challengeBackoff: Duration = .seconds(60)
     ) {
         self.store = store
         self.probes = probes
@@ -65,6 +74,8 @@ public actor Scanner {
         self.completed = 0
         self.total = personIds.count
         self.cancelled = false
+        self.challenges = [:]
+        self.skippedProbes = []
         self.paused = false
 
         runTask = Task {
@@ -126,7 +137,7 @@ public actor Scanner {
             while let finishedName = await group.next() {
                 inFlight -= 1
                 completed += 1
-                continuation?.yield(ScanProgress(completed: completed, total: total, currentName: finishedName, finished: false))
+                continuation?.yield(ScanProgress(completed: completed, total: total, currentName: finishedName, finished: false, notice: skippedProbes.isEmpty ? nil : Scanner.searchSkippedNotice))
 
                 // The pause gate sits immediately before `startNext()` (not before this whole
                 // block) so a completion that arrives while paused is still counted and
@@ -140,7 +151,7 @@ public actor Scanner {
             }
         }
 
-        continuation?.yield(ScanProgress(completed: completed, total: total, finished: true))
+        continuation?.yield(ScanProgress(completed: completed, total: total, finished: true, notice: skippedProbes.isEmpty ? nil : Scanner.searchSkippedNotice))
         finishStream()
     }
 
@@ -194,20 +205,55 @@ public actor Scanner {
 
             var findings: [ProbeFinding] = []
             var errors: [String] = []
+            var finishedStages: [String] = []
 
             for probe in probes {
+                if skippedProbes.contains(probe.id) {
+                    errors.append("\(probe.id): skipped after repeated challenges")
+                    continue
+                }
+                continuation?.yield(ScanProgress(
+                    completed: completed, total: total, currentName: displayName, finished: false,
+                    stage: probe.displayName, finishedStages: finishedStages,
+                    notice: skippedProbes.isEmpty ? nil : Scanner.searchSkippedNotice
+                ))
                 do {
                     let result = try await probe.run(probeInput, client: client)
                     findings.append(contentsOf: result)
+                    challenges[probe.id] = 0
+                    finishedStages.append(probe.displayName)
                 } catch SearchBackendError.challenge {
-                    continuation?.yield(ScanProgress(completed: completed, total: total, currentName: displayName, waitingFor: "DuckDuckGo", finished: false))
+                    challenges[probe.id, default: 0] += 1
+                    if challenges[probe.id, default: 0] >= maxChallenges {
+                        skippedProbes.insert(probe.id)
+                        errors.append("\(probe.id): skipped after repeated challenges")
+                        continuation?.yield(ScanProgress(
+                            completed: completed, total: total, currentName: displayName, finished: false,
+                            stage: probe.displayName, finishedStages: finishedStages,
+                            notice: Scanner.searchSkippedNotice
+                        ))
+                        continue
+                    }
+                    continuation?.yield(ScanProgress(
+                        completed: completed, total: total, currentName: displayName,
+                        waitingFor: "DuckDuckGo", finished: false,
+                        stage: probe.displayName, finishedStages: finishedStages
+                    ))
                     await sleepUnlessCancelled(challengeBackoff)
                     if !cancelled {
                         do {
                             let retryResult = try await probe.run(probeInput, client: client)
                             findings.append(contentsOf: retryResult)
+                            challenges[probe.id] = 0
+                            finishedStages.append(probe.displayName)
                         } catch {
                             errors.append("\(probe.id): \(error)")
+                            if case SearchBackendError.challenge = error {
+                                challenges[probe.id, default: 0] += 1
+                                if challenges[probe.id, default: 0] >= maxChallenges {
+                                    skippedProbes.insert(probe.id)
+                                }
+                            }
                         }
                     }
                 } catch HTTPError.rateLimited(let retryAfter) {
@@ -217,6 +263,7 @@ public actor Scanner {
                         do {
                             let retryResult = try await probe.run(probeInput, client: client)
                             findings.append(contentsOf: retryResult)
+                            finishedStages.append(probe.displayName)
                         } catch {
                             errors.append("\(probe.id): \(error)")
                         }

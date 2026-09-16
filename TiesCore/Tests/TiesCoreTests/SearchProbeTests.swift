@@ -11,6 +11,26 @@ import Foundation
     #expect(SearchQueryBuilder.queries(for: input(name: ("Cher", ""))).isEmpty)
 }
 
+@Test func quickModeAsksOnceWhenACompanyIsKnown() {
+    let q = SearchQueryBuilder.queries(for: input(name: ("Sara", "Ahmed"), company: "Acme"), mode: .quick)
+    #expect(q.count <= 2)
+    #expect(q == ["\"Sara Ahmed\" \"Acme\""])
+}
+
+@Test func quickModeFallsBackToLinkedInAndOnlyThenToABareName() {
+    let noCompany = SearchQueryBuilder.queries(for: input(name: ("Sara", "Ahmed")), mode: .quick)
+    #expect(noCompany == ["\"Sara Ahmed\" site:linkedin.com/in", "\"Sara Ahmed\""])
+
+    // An email is a signal of its own, so the bare-name query isn't worth the seconds.
+    let withEmail = SearchQueryBuilder.queries(for: input(name: ("Sara", "Ahmed"), emails: ["sara@acme.com"]), mode: .quick)
+    #expect(withEmail == ["\"Sara Ahmed\" site:linkedin.com/in"])
+
+    let withURL = SearchQueryBuilder.queries(for: input(name: ("Sara", "Ahmed"), urls: ["https://sara.dev"]), mode: .quick)
+    #expect(withURL == ["\"Sara Ahmed\" site:linkedin.com/in"])
+
+    #expect(SearchQueryBuilder.queries(for: input(name: ("Cher", "")), mode: .quick).isEmpty)
+}
+
 @Test func linkedInSnippetParsing() {
     let a = LinkedInSnippet.parse(title: "Tim Cook - President of Single Cup Coffee | LinkedIn",
         snippet: "President of Single Cup Coffee · Experience: Single Cup Coffee · Location: Ottawa · 459 connections on LinkedIn.")

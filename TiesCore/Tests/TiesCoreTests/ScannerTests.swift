@@ -189,3 +189,23 @@ struct AlwaysChallengeProbe: Probe {
     #expect(finished)
     #expect(elapsed < .seconds(2))
 }
+
+@Test func scannerSkipsAProbeAfterTwoChallengesAndSaysSo() async throws {
+    let store = try Store.inMemory()
+    let people = (0..<3).map { Person(givenName: "P\($0)", familyName: "X") }
+    try store.upsertPeople(people, channels: [])
+    let counter = CallCounter()
+    let probe = AlwaysChallengeProbe(counter: counter)
+    let scanner = Scanner(store: store, probes: [probe], client: FakeHTTP(), concurrency: 1, challengeBackoff: .milliseconds(5))
+
+    var notices: [String] = []
+    for await p in await scanner.run(personIds: people.map(\.id)) {
+        if let notice = p.notice { notices.append(notice) }
+    }
+
+    // Person 1: initial call (challenge 1), retry (challenge 2) → probe skipped from then on.
+    #expect(await counter.count == 2)
+    #expect(notices.contains(Scanner.searchSkippedNotice))
+    let counts = try store.counts(kind: .scan)
+    #expect(counts[.done] == 3)
+}
