@@ -30,6 +30,12 @@ final class AppModel {
     let contacts = ContactsService()
     let searchBackend: any SearchBackend
 
+    /// Why the database on disk couldn't be opened, if it couldn't. `nil` in every normal case
+    /// — including the one where an unopenable file was moved aside and a fresh one opened in
+    /// its place. When it is set, `store` is a throwaway in-memory database that nothing reads
+    /// and `RootView` shows the recovery screen instead of any of the app.
+    let storeFailure: String?
+
     /// Starts as the on-device contextual model and is swapped for `HashEmbedder` by
     /// `warmEmbedder()` if that model can't be loaded.
     var embedder: any Embedder
@@ -92,28 +98,83 @@ final class AppModel {
     }
 
     init(defaults: UserDefaults = .standard) {
-        // `Store.open` creates the Application Support directory itself, so a first run has
-        // nothing to prepare. Anything that still fails here (a corrupt file, a failed
-        // migration) leaves the app with no database at all, which nothing downstream can
-        // work around.
-        let store: Store
-        do {
-            store = try Store.open(at: Store.defaultURL)
-        } catch {
-            fatalError("Ties could not open its database at \(Store.defaultURL.path): \(error)")
-        }
+        let opened = AppModel.openStore()
         let cache = DiskCache(directory: DiskCache.defaultDirectory)
         let http = URLSessionHTTPClient(cache: cache)
         let embedder = NLContextualEmbedder()
 
         self.defaults = defaults
-        self.store = store
+        self.store = opened.store
+        self.storeFailure = opened.failure
         self.http = http
         self.cache = cache
         self.embedder = embedder
         self.searchBackend = AppModel.makeSearchBackend(defaults: defaults, client: http)
         self.setupCompleted = defaults.bool(forKey: Keys.hasCompletedSetup)
         self.providerId = defaults.string(forKey: Keys.selectedProviderId)
+    }
+
+    // MARK: - Opening the database
+
+    /// Opens the database — `Store.open` creates the Application Support directory itself, so a
+    /// first run has nothing to prepare — and, if it won't open, tries once to get out of the
+    /// way of whatever is wrong with it: the file is renamed `ties.sqlite.broken-<timestamp>`
+    /// (with its `-wal`/`-shm` siblings, which belong to it) and a fresh one opened in its
+    /// place. Nothing is deleted; a file that can still be handed to `sqlite3` is worth more
+    /// than a tidy folder.
+    ///
+    /// If that fails too, the app gets an in-memory database to stand in for the one it hasn't
+    /// got, and a message for `RootView` to show. This used to be a `fatalError`: a corrupt
+    /// file, a failed migration or a full disk meant a crash on every launch, with nothing said
+    /// and no way to reach Settings.
+    private static func openStore() -> (store: Store, failure: String?) {
+        let url = Store.defaultURL
+        do {
+            return (try Store.open(at: url), nil)
+        } catch {
+            let firstError = error
+            do {
+                try moveDatabaseAside(url)
+                return (try Store.open(at: url), nil)
+            } catch {
+                let failure = """
+                    Ties couldn't open \(url.path), and couldn't move it aside to start over.
+
+                    \(firstError.localizedDescription)
+                    """
+                return (placeholderStore(), failure)
+            }
+        }
+    }
+
+    /// Renames the database and the two files SQLite keeps beside it out of the way, so the
+    /// next `Store.open` makes a new one. A `-wal` left next to a fresh database would be read
+    /// as part of it, so all three move together or the whole attempt is abandoned.
+    private static func moveDatabaseAside(_ url: URL) throws {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        let suffix = ".broken-" + formatter.string(from: .now)
+
+        let manager = FileManager.default
+        for sibling in ["", "-wal", "-shm"] {
+            let source = URL(fileURLWithPath: url.path + sibling)
+            guard manager.fileExists(atPath: source.path) else { continue }
+            try manager.moveItem(at: source, to: URL(fileURLWithPath: source.path + suffix))
+        }
+    }
+
+    /// Stands in for the database when there is none, so the rest of the object graph — every
+    /// view of which holds a `Store` — can still be built and can still draw the recovery
+    /// screen. Nothing is ever written to it or read back out.
+    private static func placeholderStore() -> Store {
+        do {
+            return try Store.inMemory()
+        } catch {
+            // Migrating an empty in-memory database can only fail if the schema itself is
+            // wrong, which is a bug in this build rather than anything on the user's Mac.
+            preconditionFailure("Ties could not create an in-memory database: \(error)")
+        }
     }
 
     /// Proves the on-device embedding model can actually produce a vector — it has to
