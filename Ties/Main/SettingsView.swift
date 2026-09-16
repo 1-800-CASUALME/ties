@@ -57,13 +57,15 @@ private struct GeneralSettingsView: View {
             Section {
                 HStack(spacing: 10) {
                     Button("Export JSON…", action: exportJSON)
-                        .disabled(exporting)
+                        .disabled(exporting || model.storeFailure != nil)
                     if exporting {
                         ProgressView().controlSize(.small)
                     }
                     Spacer()
+                    // With the real database unopenable these would only act on the in-memory
+                    // placeholder while every row on disk survived.
                     Button("Delete Everything", role: .destructive) { confirmingDelete = true }
-                        .disabled(exporting)
+                        .disabled(exporting || model.storeFailure != nil)
                 }
                 if let message {
                     Text(message)

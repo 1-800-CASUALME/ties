@@ -145,7 +145,8 @@ final class AppModel {
 
                     \(firstError.localizedDescription)
                     """
-                return (placeholderStore(), failure, true)
+                // Nothing was moved, so the on-disk database is intact: leave setup state alone.
+                return (placeholderStore(), failure, false)
             }
         }
     }
