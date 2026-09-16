@@ -98,7 +98,37 @@ public enum CandidateScorer {
     /// Evidence kinds considered in this fixed order when building a candidate's evidence list,
     /// so the output is deterministic regardless of dictionary iteration order. `.conflict`
     /// items aren't part of this dedup pass (every one is kept), so they're appended after.
-    private static let dedupedKindOrder: [Evidence.Kind] = [.emailHash, .phone, .company, .location, .avatar, .username, .name]
+    /// Ordered strongest first, so the evidence list reads as the reason the candidate scored
+    /// what it did. Every kind must appear here: one left out is one dropped from the output.
+    private static let dedupedKindOrder: [Evidence.Kind] = [
+        .emailHash, .selfLink, .phone, .company, .signatureTitle, .selfName, .location, .avatar, .username, .honorific, .name,
+    ]
+
+    /// Honorific -> the profession words it implies, used both to credit a candidate whose
+    /// headline says what the honorific claims and to spot a headline that contradicts the
+    /// title in the person's mail signature.
+    // TODO(Task 6): switch to Honorifics.professions
+    private static let professionsByHonorific: [String: [String]] = [
+        "dr": ["doctor", "physician", "dentist", "phd", "md"],
+        "eng": ["engineer"],
+        "prof": ["professor"],
+        "capt": ["captain", "pilot"],
+        "adv": ["lawyer", "attorney", "advocate"],
+        "arch": ["architect"],
+    ]
+
+    /// Profession word -> the honorific it belongs to, so "Physician" and "Doctor" are read as
+    /// one profession rather than two contradicting ones. Built once, over sorted keys so a
+    /// word claimed by two honorifics resolves deterministically.
+    private static let honorificByProfession: [String: String] = {
+        var map: [String: String] = [:]
+        for honorific in professionsByHonorific.keys.sorted() {
+            for profession in professionsByHonorific[honorific] ?? [] {
+                map[profession] = honorific
+            }
+        }
+        return map
+    }()
 
     public static func score(groups: [[ProbeFinding]], input: ProbeInput, weights: ScoringWeights = .default) -> [ScoredCandidate] {
         // Pair each scored candidate with its original group index before sorting, so that
@@ -124,7 +154,8 @@ public enum CandidateScorer {
     }
 
     private static func scoreGroup(_ group: [ProbeFinding], input: ProbeInput, weights: ScoringWeights) -> ScoredCandidate? {
-        guard passesNameGate(group, input: input) else { return nil }
+        let selfLink = selfLinkMatch(group, input: input)
+        guard passesNameGate(group, input: input, hasSelfLink: selfLink != nil) else { return nil }
 
         let candidateId = UUID().uuidString
 
@@ -164,8 +195,15 @@ public enum CandidateScorer {
         // on strings differing only in case (e.g. "ACME CORP" vs "acme corp") can score well
         // under 0.9 and even under 0.5, which would otherwise manufacture a false conflict for
         // the very same company.
-        if let inputCompany = input.company, let groupCompany {
-            let similarity = NameMatcher.jaroWinkler(NameMatcher.normalize(inputCompany), NameMatcher.normalize(groupCompany))
+        //
+        // Every company we know of counts — the Contacts organization and any read out of a
+        // mail signature — so the candidate agrees if it matches one of them, and only
+        // conflicts if it matches none.
+        if let groupCompany, !input.companies.isEmpty {
+            let normalizedGroupCompany = NameMatcher.normalize(groupCompany)
+            let similarity = input.companies
+                .map { NameMatcher.jaroWinkler(NameMatcher.normalize($0), normalizedGroupCompany) }
+                .max() ?? 0
             if similarity >= 0.9 {
                 if kept[.company] == nil {
                     kept[.company] = EvidenceItem(kind: .company, weight: weights.company, detail: "Company matches: \(groupCompany)", sourceURL: nil)
@@ -186,6 +224,42 @@ public enum CandidateScorer {
         // empty-string guard as username above.
         if kept[.avatar] == nil, sharedAcrossHosts(group, value: { nonEmpty($0.avatarURL) }) {
             kept[.avatar] = EvidenceItem(kind: .avatar, weight: weights.avatar, detail: "Shared avatar across profiles", sourceURL: nil)
+        }
+
+        // Derived: the person pointed at this page themselves, in a message or a signature.
+        if kept[.selfLink] == nil, let selfLink {
+            kept[.selfLink] = EvidenceItem(kind: .selfLink, weight: weights.selfLink, detail: "They shared this link themselves", sourceURL: selfLink)
+        }
+
+        // Derived: the candidate goes by a name the person actually answers to — or by one that
+        // rules them out, when the handle's push name is somebody else's full name entirely.
+        if let displayName {
+            if kept[.selfName] == nil, let alias = matchingAlias(displayName, input: input) {
+                kept[.selfName] = EvidenceItem(kind: .selfName, weight: weights.selfName, detail: "Known as \(alias)", sourceURL: nil)
+            } else if kept[.selfName] == nil, let alias = conflictingAlias(displayName, input: input) {
+                conflictItems.append(EvidenceItem(kind: .conflict, weight: weights.conflict, detail: "Known as \(alias), not \(displayName)", sourceURL: nil))
+            }
+        }
+
+        // Derived: the headline says what their mail signature says — or says a different
+        // profession outright.
+        if let headline {
+            if kept[.signatureTitle] == nil, let title = input.titles.first(where: { titleMatches(headline, title: $0) }) {
+                kept[.signatureTitle] = EvidenceItem(kind: .signatureTitle, weight: weights.signatureTitle, detail: "Signature title matches: \(title)", sourceURL: nil)
+            } else if let clash = professionConflict(headline: headline, input: input) {
+                conflictItems.append(EvidenceItem(kind: .conflict, weight: weights.conflict, detail: "Signature says \(clash.theirs), the page says \(clash.page)", sourceURL: nil))
+            }
+        }
+
+        // Derived: the page names a profession the honorific other people use implies.
+        if kept[.honorific] == nil,
+           let match = honorificMatch(in: group.flatMap { [$0.headline, $0.snippet].compactMap(\.self) }, input: input) {
+            kept[.honorific] = EvidenceItem(kind: .honorific, weight: weights.honorific, detail: "Called \(match.honorific); the page says \(match.profession)", sourceURL: nil)
+        }
+
+        // Derived: the city the Mac already knows agrees with the candidate's.
+        if kept[.location] == nil, let location, let signalLocation = nonEmpty(input.signals?.location), locationMatches(location, signalLocation) {
+            kept[.location] = EvidenceItem(kind: .location, weight: weights.location, detail: "Location matches: \(location)", sourceURL: nil)
         }
 
         var evidence: [Evidence] = []
@@ -235,13 +309,20 @@ public enum CandidateScorer {
         return ScoredCandidate(candidate: candidate, evidence: evidence, pages: pages)
     }
 
-    /// Passes when any finding's `displayName` is a plausible match for the contact's name, or
-    /// any finding carries `.emailHash` evidence (a hashed-identity match is proof enough on its
-    /// own), or any finding's body text mentions the contact's name.
-    private static func passesNameGate(_ group: [ProbeFinding], input: ProbeInput) -> Bool {
+    /// Passes when any finding's `displayName` is a plausible match for any name the contact
+    /// goes by (the one in Contacts or an alias the local signals collected), or the group is a
+    /// link the person shared themselves, or any finding carries `.emailHash` evidence (a
+    /// hashed-identity match is proof enough on its own), or any finding's body text mentions
+    /// the contact's name.
+    private static func passesNameGate(_ group: [ProbeFinding], input: ProbeInput, hasSelfLink: Bool) -> Bool {
+        // They pointed at this page themselves, so it identifies them whether or not it repeats
+        // their name — a personal site's landing page often doesn't.
+        if hasSelfLink { return true }
+
+        let names = input.aliases
         let nameMatches = group.contains { finding in
             guard let name = finding.displayName else { return false }
-            return NameMatcher.similarity(personName: input.fullName, candidateName: name) >= NameMatcher.gate
+            return names.contains { NameMatcher.similarity(personName: $0, candidateName: name) >= NameMatcher.gate }
         }
         if nameMatches { return true }
 
@@ -252,6 +333,139 @@ public enum CandidateScorer {
             guard let body = finding.bodyText else { return false }
             return NameMatcher.containsName(body, personName: input.fullName)
         }
+    }
+
+    /// The URL of the first finding in the group that the person shared or signed with
+    /// themselves, compared in `ProbeFinding.canonical` form. A finding that merely vouches for
+    /// such a URL (a Gravatar's verified accounts) counts too.
+    private static func selfLinkMatch(_ group: [ProbeFinding], input: ProbeInput) -> String? {
+        guard let links = input.signals?.links, !links.isEmpty else { return nil }
+        let shared = Set(links.map(canonicalLink))
+
+        for finding in group {
+            if shared.contains(canonicalLink(finding.url)) { return finding.url }
+            if let linked = finding.linkedURLs.first(where: { shared.contains(canonicalLink($0)) }) { return linked }
+        }
+        return nil
+    }
+
+    /// `ProbeFinding.canonical` with a bare trailing slash dropped as well, so "https://sara.dev"
+    /// and "https://sara.dev/" are one link.
+    private static func canonicalLink(_ url: String) -> String {
+        var canonical = ProbeFinding.canonical(url)
+        if canonical.hasSuffix("/") { canonical.removeLast() }
+        return canonical
+    }
+
+    /// The first alias the person actually goes by that this candidate's display name matches.
+    /// An alias that is just the Contacts name again doesn't count — a candidate matching that
+    /// is what `.name` evidence is for.
+    private static func matchingAlias(_ displayName: String, input: ProbeInput) -> String? {
+        input.signals?.aliases.first { alias in
+            NameMatcher.similarity(personName: input.fullName, candidateName: alias) < NameMatcher.gate
+                && NameMatcher.similarity(personName: alias, candidateName: displayName) >= NameMatcher.gate
+        }
+    }
+
+    /// An alias that is a full name in its own right — two tokens — sharing not one word with
+    /// the candidate's display name. That is the shape of a shared handle whose WhatsApp push
+    /// name belongs to somebody else in the household or the office, which is a reason to doubt
+    /// the candidate rather than to believe it.
+    ///
+    /// Sharing no word isn't quite enough on its own: "Mohammed Ali" and "Mohamed Aly" have no
+    /// word in common and are the same man, so a pair that `NameMatcher` still reads as a match
+    /// is spelling, not contradiction. (The similarity has to be read against the match gate
+    /// rather than some lower line: nickname expansion alone puts two names as unalike as "Bob
+    /// Ray" and "Sara Ahmed" at 0.53, because "Bob" becomes "Robert".)
+    private static func conflictingAlias(_ displayName: String, input: ProbeInput) -> String? {
+        guard let aliases = input.signals?.aliases else { return nil }
+        let candidateTokens = Set(tokens(displayName))
+
+        return aliases.first { alias in
+            let aliasTokens = tokens(alias)
+            guard aliasTokens.count == 2, candidateTokens.isDisjoint(with: aliasTokens) else { return false }
+            return NameMatcher.similarity(personName: alias, candidateName: displayName) < NameMatcher.gate
+        }
+    }
+
+    /// True when the headline says what the signature title says: the title appears in it
+    /// outright, or some run of words in it is the title bar a word ending (JW >= 0.85).
+    private static func titleMatches(_ headline: String, title: String) -> Bool {
+        let normalizedTitle = NameMatcher.normalize(title)
+        let normalizedHeadline = NameMatcher.normalize(headline)
+        guard !normalizedTitle.isEmpty, !normalizedHeadline.isEmpty else { return false }
+        if normalizedHeadline.contains(normalizedTitle) { return true }
+
+        let headlineTokens = tokens(headline)
+        let titleTokenCount = tokens(title).count
+        guard titleTokenCount > 0, headlineTokens.count >= titleTokenCount else {
+            return NameMatcher.jaroWinkler(normalizedHeadline, normalizedTitle) >= 0.85
+        }
+        for start in 0...(headlineTokens.count - titleTokenCount) {
+            let window = headlineTokens[start..<(start + titleTokenCount)].joined(separator: " ")
+            if NameMatcher.jaroWinkler(window, normalizedTitle) >= 0.85 { return true }
+        }
+        return false
+    }
+
+    /// The professions a signature title and a candidate headline name when they are different
+    /// professions altogether — "Cardiologist, MD" against "Software Engineer". Only words in
+    /// `professionsByHonorific` count, and only their honorific families are compared, so
+    /// "Physician" against "Doctor" is one profession said twice rather than a contradiction,
+    /// and two titles the map has never heard of never conflict.
+    private static func professionConflict(headline: String, input: ProbeInput) -> (theirs: String, page: String)? {
+        let page = professions(in: headline)
+        let theirs = input.titles.flatMap { professions(in: $0) }
+        guard let firstPage = page.first, let firstTheirs = theirs.first else { return nil }
+        guard Set(theirs.map(\.honorific)).isDisjoint(with: page.map(\.honorific)) else { return nil }
+        return (theirs: firstTheirs.word, page: firstPage.word)
+    }
+
+    /// The honorific the person is addressed by and the profession word the pages actually use,
+    /// when the two agree — "Dr" and a headline reading "Cardiologist, MD".
+    private static func honorificMatch(in texts: [String], input: ProbeInput) -> (honorific: String, profession: String)? {
+        guard let honorifics = input.signals?.honorifics, !honorifics.isEmpty, !texts.isEmpty else { return nil }
+        let words = Set(texts.flatMap(tokens))
+
+        for honorific in honorifics {
+            let implied = professionsByHonorific[canonicalHonorific(honorific)] ?? []
+            if let hit = implied.first(where: { words.contains($0) }) {
+                return (honorific: honorific, profession: hit)
+            }
+        }
+        return nil
+    }
+
+    /// The profession words a piece of text uses, each with the honorific family it belongs to,
+    /// in the order they appear.
+    private static func professions(in text: String) -> [(word: String, honorific: String)] {
+        tokens(text).compactMap { word in
+            honorificByProfession[word].map { (word: word, honorific: $0) }
+        }
+    }
+
+    /// An honorific reduced to the key `professionsByHonorific` uses: "Dr." and "DR" are both
+    /// "dr". Arabic spellings are left as written and so simply don't match, until this reads
+    /// the real vocabulary.
+    // TODO(Task 6): switch to Honorifics.professions
+    private static func canonicalHonorific(_ honorific: String) -> String {
+        honorific.lowercased().trimmingCharacters(in: .punctuationCharacters.union(.whitespaces))
+    }
+
+    /// True when a candidate's location and the one the Mac already knows name the same place:
+    /// one contains the other ("Riyadh" in "Riyadh, Saudi Arabia") or they are the same word bar
+    /// a spelling (JW >= 0.9).
+    private static func locationMatches(_ candidate: String, _ known: String) -> Bool {
+        let a = NameMatcher.normalize(candidate)
+        let b = NameMatcher.normalize(known)
+        guard !a.isEmpty, !b.isEmpty else { return false }
+        if a.contains(b) || b.contains(a) { return true }
+        return NameMatcher.jaroWinkler(a, b) >= 0.9
+    }
+
+    /// The normalized words of a string.
+    private static func tokens(_ s: String) -> [String] {
+        NameMatcher.normalize(s).split(separator: " ").map(String.init)
     }
 
     /// True when any of the contact's known phone numbers' last 7 digits appear in any

@@ -342,7 +342,7 @@ final class AppModel {
             ))
         }
         probes.append(PageFetchProbe(maxPages: mode.pagesFetched))
-        return ResearchScanner(store: store, probes: probes, client: http, concurrency: scanConcurrency)
+        return ResearchScanner(store: store, probes: probes, client: http, mode: mode, concurrency: scanConcurrency)
     }
 
     /// How many people are researched at once.

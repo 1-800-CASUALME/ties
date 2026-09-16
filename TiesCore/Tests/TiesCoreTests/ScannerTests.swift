@@ -209,3 +209,70 @@ struct AlwaysChallengeProbe: Probe {
     let counts = try store.counts(kind: .scan)
     #expect(counts[.done] == 3)
 }
+
+// MARK: - Task 7: self-links settle the identity
+
+/// Records how many times it ran, and returns nothing.
+struct CountingProbe: Probe {
+    let id: String
+    let counter: CallCounter
+    func run(_ input: ProbeInput, client: any HTTPClient) async throws -> [ProbeFinding] {
+        await counter.increment()
+        return []
+    }
+}
+
+@Test func scannerSkipsSearchWhenSelfLinkKnown() async throws {
+    let store = try Store.inMemory()
+    let a = Person(givenName: "Sara", familyName: "Ahmed")
+    try store.upsertPeople([a], channels: [])
+    try store.upsertSignals(LocalSignals(personId: a.id, links: ["https://sara.dev"]))
+    let http = FakeHTTP()
+    http.routes = [("sara.dev", 200, try fixture("page", "html"))]
+    let searches = CallCounter()
+    let scanner = Scanner(store: store, probes: [CountingProbe(id: "search", counter: searches), PageFetchProbe()],
+                          client: http, mode: .quick, concurrency: 1)
+
+    var last: ScanProgress?
+    for await p in await scanner.run(personIds: [a.id]) { last = p }
+
+    #expect(last?.finished == true)
+    #expect(await searches.count == 0)                                   // the web was never asked
+    #expect(http.requested.contains { $0.contains("sara.dev") })         // the link was fetched
+    let candidates = try store.candidates(personId: a.id)
+    #expect(candidates.count == 1)
+    #expect(candidates.first?.status == .auto)
+    let evidence = try store.evidence(candidateId: candidates[0].id)
+    #expect(evidence.contains { $0.kind == .selfLink })
+}
+
+@Test func scannerStillSearchesInThoroughMode() async throws {
+    let store = try Store.inMemory()
+    let a = Person(givenName: "Sara", familyName: "Ahmed")
+    try store.upsertPeople([a], channels: [])
+    try store.upsertSignals(LocalSignals(personId: a.id, links: ["https://sara.dev"]))
+    let http = FakeHTTP()
+    http.routes = [("sara.dev", 200, try fixture("page", "html"))]
+    let searches = CallCounter()
+    let scanner = Scanner(store: store, probes: [CountingProbe(id: "search", counter: searches), PageFetchProbe()],
+                          client: http, mode: .thorough, concurrency: 1)
+
+    for await _ in await scanner.run(personIds: [a.id]) {}
+
+    #expect(await searches.count == 1)
+    #expect(http.requested.contains { $0.contains("sara.dev") })         // still fetched directly
+}
+
+@Test func scannerSearchesWhenTheOnlySelfLinkIsAShortener() async throws {
+    let store = try Store.inMemory()
+    let a = Person(givenName: "Sara", familyName: "Ahmed")
+    try store.upsertPeople([a], channels: [])
+    try store.upsertSignals(LocalSignals(personId: a.id, links: ["https://bit.ly/3xYz"]))
+    let searches = CallCounter()
+    let scanner = Scanner(store: store, probes: [CountingProbe(id: "search", counter: searches)],
+                          client: FakeHTTP(), mode: .quick, concurrency: 1)
+
+    for await _ in await scanner.run(personIds: [a.id]) {}
+
+    #expect(await searches.count == 1)
+}

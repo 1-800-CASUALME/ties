@@ -25,26 +25,61 @@ public struct PageFetchProbe: Probe {
             guard let url = URL(string: urlString), let host = url.host?.lowercased() else { continue }
             guard !host.contains("linkedin.com") else { continue }
 
-            do {
-                fetched += 1
-                let response = try await client.get(url, headers: [:])
-                let (title, text) = try ReadableText.extract(html: response.text)
-                guard NameMatcher.containsName(text, personName: input.fullName) else { continue }
+            fetched += 1
+            guard let page = await readable(url, client: client) else { continue }
+            // A URL on a contact card is only evidence if the page it leads to is about the
+            // person — a company's home page is on many cards and identifies nobody.
+            guard NameMatcher.containsName(page.text, personName: input.fullName) else { continue }
 
-                findings.append(ProbeFinding(
-                    url: ProbeFinding.canonical(urlString),
-                    pageTitle: title,
-                    bodyText: text,
-                    pageKind: .page,
-                    evidence: [
-                        EvidenceItem(kind: .name, weight: 0, detail: "Page text mentions \(input.fullName)", sourceURL: urlString),
-                    ]
-                ))
-            } catch {
-                continue
-            }
+            findings.append(ProbeFinding(
+                url: ProbeFinding.canonical(urlString),
+                pageTitle: page.title,
+                bodyText: page.text,
+                pageKind: .page,
+                evidence: [
+                    EvidenceItem(kind: .name, weight: 0, detail: "Page text mentions \(input.fullName)", sourceURL: urlString),
+                ]
+            ))
         }
 
         return findings
+    }
+
+    /// Fetches links the person shared or signed with themselves, in the order given.
+    ///
+    /// These aren't pages that happen to mention the person — they are pages the person pointed
+    /// at — so neither the name gate nor the LinkedIn skip that `run(_:client:)` applies belongs
+    /// here, and a URL that can't be read comes back as a finding all the same: what makes it
+    /// evidence is the link itself, which `CandidateScorer` scores as `.selfLink`, not anything
+    /// written on the page.
+    public func fetchDirect(urls: [String], input: ProbeInput, client: any HTTPClient) async -> [ProbeFinding] {
+        var findings: [ProbeFinding] = []
+
+        for urlString in urls.prefix(maxPages) {
+            guard let url = URL(string: urlString), let host = url.host?.lowercased() else { continue }
+
+            // LinkedIn blocks scraping, so there is nothing to read; the URL is still theirs.
+            let page = host.contains("linkedin.com") ? nil : await readable(url, client: client)
+            let mentionsName = page.map { NameMatcher.containsName($0.text, personName: input.fullName) } ?? false
+
+            findings.append(ProbeFinding(
+                url: ProbeFinding.canonical(urlString),
+                pageTitle: page?.title,
+                bodyText: page?.text,
+                pageKind: .page,
+                evidence: mentionsName
+                    ? [EvidenceItem(kind: .name, weight: 0, detail: "Page text mentions \(input.fullName)", sourceURL: urlString)]
+                    : []
+            ))
+        }
+
+        return findings
+    }
+
+    /// Downloads a page and extracts its readable text, or `nil` if either step fails.
+    private func readable(_ url: URL, client: any HTTPClient) async -> (title: String?, text: String)? {
+        guard let response = try? await client.get(url, headers: [:]),
+              let page = try? ReadableText.extract(html: response.text) else { return nil }
+        return page
     }
 }
