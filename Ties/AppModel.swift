@@ -24,6 +24,9 @@ final class AppModel {
 
     let store: Store
     let http: URLSessionHTTPClient
+    /// The disk cache `http` reads and writes. Held here as well so "Delete Everything" can
+    /// empty the one the app is actually using rather than a second handle on the same folder.
+    let cache: DiskCache
     let contacts = ContactsService()
     let searchBackend: any SearchBackend
 
@@ -99,12 +102,14 @@ final class AppModel {
         } catch {
             fatalError("Ties could not open its database at \(Store.defaultURL.path): \(error)")
         }
-        let http = URLSessionHTTPClient(cache: DiskCache(directory: DiskCache.defaultDirectory))
+        let cache = DiskCache(directory: DiskCache.defaultDirectory)
+        let http = URLSessionHTTPClient(cache: cache)
         let embedder = NLContextualEmbedder()
 
         self.defaults = defaults
         self.store = store
         self.http = http
+        self.cache = cache
         self.embedder = embedder
         self.searchBackend = AppModel.makeSearchBackend(defaults: defaults, client: http)
         self.setupCompleted = defaults.bool(forKey: Keys.hasCompletedSetup)
@@ -160,6 +165,51 @@ final class AppModel {
         for task in running {
             task.cancel()
         }
+    }
+
+    // MARK: - Erasing everything
+
+    /// Removes everything Ties has put on this Mac: every row in the database (vacuumed, so the
+    /// pages it frees don't keep the names and page bodies that were written on them), every
+    /// Keychain item, the cached body of every page the research fetched, and the settings
+    /// describing the setup that produced all of it. Exactly what the confirmation dialog in
+    /// Settings promises, so that promise is true.
+    ///
+    /// Work still running is stopped first. A scan or a search started before this point is
+    /// reading rows that are about to go, and would otherwise finish by writing candidates,
+    /// profiles, or a note about people who no longer exist.
+    ///
+    /// The open database and the search backend themselves are left alone: both were built at
+    /// launch, and the app is on its way back to setup, which builds what it needs again.
+    func deleteEverything() throws {
+        cancelAllWork()
+
+        // Everything that can't fail goes first, so a database error can't leave the API keys
+        // and the cached pages behind — they are the part of this the user has no other way to
+        // reach, and the part the dialog is most explicit about.
+        Keychain.deleteAll()
+        cache.clear()
+        clearSettings()
+
+        try store.deleteEverything()
+    }
+
+    /// Forgets the chosen provider, its saved overrides, the search engine, and the fact that
+    /// setup was ever finished — which drops the app back into the wizard, the only screen with
+    /// anything to show once the database is empty.
+    private func clearSettings() {
+        for key in defaults.dictionaryRepresentation().keys where key.hasPrefix(Keys.providerConfigPrefix) {
+            defaults.removeObject(forKey: key)
+        }
+        defaults.removeObject(forKey: Keys.selectedProviderId)
+        defaults.removeObject(forKey: Keys.searchBackend)
+        defaults.removeObject(forKey: Keys.hasCompletedSetup)
+
+        providerId = nil
+        setupCompleted = false
+        detections = [:]
+        selectedPersonId = nil
+        resumeWizardStep = nil
     }
 
     // MARK: - Factories
