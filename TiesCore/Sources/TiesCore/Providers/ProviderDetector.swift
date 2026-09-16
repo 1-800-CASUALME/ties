@@ -66,11 +66,15 @@ public struct ProviderDetector: Sendable {
     /// GETs `url` and reports success on any 2xx status, racing the request against a
     /// 1-second timeout since `HTTPClient.get` has none of its own. Any thrown error
     /// (including the injected client's) is treated as "not available", never propagated.
+    ///
+    /// The request bypasses every cache: this asks whether a local server is answering *now*,
+    /// and the shared client's disk cache holds a 200 for a week, so a stopped Ollama would
+    /// otherwise keep its "detected" dot lit for seven days across relaunches.
     private func probeHTTP(_ url: URL) async -> Bool {
         await withTaskGroup(of: Bool.self) { group in
             group.addTask {
                 do {
-                    let response = try await self.client.get(url, headers: [:])
+                    let response = try await self.client.get(url, headers: [:], bypassCache: true)
                     return (200..<300).contains(response.status)
                 } catch {
                     return false

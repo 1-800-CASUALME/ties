@@ -18,24 +18,31 @@ final class FakeHTTP: HTTPClient, @unchecked Sendable {
     /// Request headers and POST bodies, in call order, for asserting what was sent.
     var sentHeaders: [[String: String]] = []
     var sentBodies: [Data] = []
+    /// The `bypassCache` flag of each GET, in call order (POSTs record nothing here).
+    var bypassedCache: [Bool] = []
     private let lock = NSLock()
 
     func get(_ url: URL, headers: [String: String]) async throws -> HTTPResponse {
-        try respond(url: url, headers: headers, body: nil)
+        try respond(url: url, headers: headers, body: nil, bypassCache: false)
+    }
+
+    func get(_ url: URL, headers: [String: String], bypassCache: Bool) async throws -> HTTPResponse {
+        try respond(url: url, headers: headers, body: nil, bypassCache: bypassCache)
     }
 
     func post(_ url: URL, headers: [String: String], body: Data) async throws -> HTTPResponse {
-        try respond(url: url, headers: headers, body: body)
+        try respond(url: url, headers: headers, body: body, bypassCache: nil)
     }
 
     // `NSLock.lock()`/`unlock()` can't be called directly from an `async` function body
     // (they're `noasync`); a plain synchronous helper sidesteps that while keeping the same
     // lock-protected bookkeeping.
-    private func respond(url: URL, headers: [String: String], body: Data?) throws -> HTTPResponse {
+    private func respond(url: URL, headers: [String: String], body: Data?, bypassCache: Bool?) throws -> HTTPResponse {
         lock.lock()
         requested.append(url.absoluteString)
         sentHeaders.append(headers)
         if let body { sentBodies.append(body) }
+        if let bypassCache { bypassedCache.append(bypassCache) }
         let next = scripted.isEmpty ? nil : scripted.removeFirst()
         lock.unlock()
 

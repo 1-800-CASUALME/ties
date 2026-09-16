@@ -44,3 +44,18 @@ import Foundation
     let result = await ProviderDetector.runShell("/bin/echo hi", timeout: .seconds(3))
     #expect(result == "hi")
 }
+
+@Test func detectorBypassesTheResponseCache() async {
+    let http = FakeHTTP(); http.routes = [("11434/api/tags", 200, Data("{}".utf8))]
+    let d = ProviderDetector(client: http, fileExists: { _ in false }, which: { _ in nil })
+    #expect(await d.detect(ProviderCatalog.spec("ollama")!) == .available("http://127.0.0.1:11434/v1"))
+    // The shared client caches GETs on disk for 7 days, so a liveness probe that is allowed
+    // to read that cache reports a stopped local server as running for a week.
+    #expect(http.bypassedCache == [true])
+}
+
+@Test func plainGetDoesNotBypassTheResponseCache() async throws {
+    let http = FakeHTTP(); http.routes = [("example.com", 200, Data())]
+    _ = try await http.get(URL(string: "https://example.com/x")!, headers: [:])
+    #expect(http.bypassedCache == [false])
+}
