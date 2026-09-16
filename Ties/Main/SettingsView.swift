@@ -242,7 +242,8 @@ private struct ProviderSettingsView: View {
 
 // MARK: - Research
 
-/// Which engine the research searches with, and the optional keys that make the probes better.
+/// Which engine the research searches with, how deep it digs, and the optional keys that make
+/// the probes better.
 private struct ResearchSettingsView: View {
     @Environment(AppModel.self) private var model
 
@@ -255,6 +256,13 @@ private struct ResearchSettingsView: View {
         )
     }
 
+    private var mode: Binding<ScanMode> {
+        Binding(
+            get: { model.scanMode },
+            set: { model.setScanMode($0) }
+        )
+    }
+
     var body: some View {
         Form {
             Section {
@@ -263,8 +271,9 @@ private struct ResearchSettingsView: View {
                     // selected and still searching with DuckDuckGo underneath.
                     model.setSearchBackend(model.searchBackendId)
                 }
+                ScanModePicker(mode: mode)
             } footer: {
-                Text("DuckDuckGo needs no key and is used whenever the chosen engine has none. Changing the engine takes effect on the next research run.")
+                Text("DuckDuckGo needs no key and is used whenever the chosen engine has none. Quick runs one or two searches, fifteen username sites and three pages for each person; thorough runs four searches, forty sites and every page. Both take effect on the next research run.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

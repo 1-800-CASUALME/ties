@@ -115,3 +115,21 @@ import Foundation
     #expect(!http.requested.contains { $0.contains("linkedin") })
 }
 
+@Test func pageFetchStopsAtMaxPages() async throws {
+    let http = FakeHTTP()
+    http.routes = [(".dev", 200, try fixture("page", "html"))]
+    let urls = (1...6).map { "https://sara\($0).dev" }
+    let f = try await PageFetchProbe(maxPages: ScanMode.quick.pagesFetched)
+        .run(input(name: ("Sara", "Ahmed"), urls: urls), client: http)
+    #expect(http.requested.count == 3)
+    #expect(f.count == 3)
+
+    // The LinkedIn URL is skipped before it is counted, so it doesn't eat one of the three.
+    let withLinkedIn = FakeHTTP()
+    withLinkedIn.routes = [(".dev", 200, try fixture("page", "html"))]
+    _ = try await PageFetchProbe(maxPages: 3)
+        .run(input(name: ("Sara", "Ahmed"), urls: ["https://www.linkedin.com/in/sara"] + urls), client: withLinkedIn)
+    #expect(withLinkedIn.requested.count == 3)
+    #expect(!withLinkedIn.requested.contains { $0.contains("linkedin") })
+}
+

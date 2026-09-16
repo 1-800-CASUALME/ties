@@ -15,6 +15,13 @@ public struct UsernameProbe: Probe {
     /// At most this many site checks run concurrently.
     private let maxInFlight = 2
 
+    /// The two limits multiply: forty sites by four usernames is 160 requests for one person,
+    /// which is most of what a thorough scan costs. `ScanMode` holds the pair a quick run uses.
+    ///
+    /// Nothing is checked for a person whose only email is a shared mailbox —
+    /// `UsernameDeriver` drops generic local parts ("info", "admin", "contact" and the rest)
+    /// before they ever get here, so `usernames` comes back empty and the probe returns
+    /// immediately. A `first.last@` address is a real handle and is kept.
     public init(dataset: WMNDataset, maxSites: Int = 40, maxUsernames: Int = 4) {
         self.dataset = dataset
         self.maxSites = maxSites

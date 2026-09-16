@@ -47,8 +47,11 @@ struct ScanView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
+            HStack(spacing: 12) {
                 Spacer()
+                ScanModePicker(mode: modeBinding)
+                    .labelsHidden()
+                    .fixedSize()
                 engineMenu
             }
             .padding(.horizontal, 20)
@@ -108,7 +111,21 @@ struct ScanView: View {
         }
     }
 
-    // MARK: - Which engine
+    // MARK: - How deep, and which engine
+
+    /// How deep the research goes, changed here for the same reason the engine is: the moment
+    /// a batch of hundreds is obviously going to take all afternoon is while watching it.
+    /// Switching restarts the run over whoever is left, exactly as switching engine does.
+    private var modeBinding: Binding<ScanMode> {
+        Binding(
+            get: { model.scanMode },
+            set: { mode in
+                guard mode != model.scanMode else { return }
+                model.setScanMode(mode)
+                restartScan()
+            }
+        )
+    }
 
     /// The engine the research searches with, changeable here rather than only in Settings: the
     /// moment it is obviously not working is while watching it not work.
@@ -147,6 +164,13 @@ struct ScanView: View {
     /// yet — the people already done were found with the old engine, and are done either way.
     private func switchTo(_ id: String) {
         model.setSearchBackend(id)
+        restartScan()
+    }
+
+    /// Stops the scanner, which ends its stream; `runUntilDone()` then comes round with a fresh
+    /// one built from whatever was just chosen, over whoever is still pending. Resuming first,
+    /// because a paused run would otherwise sit there and the switch would look like nothing.
+    private func restartScan() {
         restartRequested = true
         paused = false
         Task { await state.scanner?.cancel() }

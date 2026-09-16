@@ -33,6 +33,15 @@ Requires macOS 15 or later. Apple Intelligence as a provider needs macOS 26 on a
 4. **Search.** Type a name or a phone fragment to filter, or ask a question and Ties ranks people
    by how well their profile answers it, with the matching phrases highlighted.
 
+## How long does research take?
+
+Quick — the default — is about 5–10 seconds a person with DuckDuckGo, and faster with a Tavily
+or Exa key, since those search several people at once instead of one query at a time. Thorough
+is around 30 seconds a person: four searches, forty username sites and every page it can reach.
+Switch between them with the hare and the tortoise on the research screen, or in Settings ›
+Research. Nothing is lost either way — you can leave a long run going, pause it, or change depth
+or engine half way through, and whoever has already been researched stays researched.
+
 ## Providers
 
 Pick any one of 26 providers in the wizard, or change it later in Settings. Free options come

@@ -19,6 +19,7 @@ final class AppModel {
         static let hasCompletedSetup = "hasCompletedSetup"
         static let selectedProviderId = "selectedProviderId"
         static let searchBackend = "searchBackend"
+        static let scanMode = "scanMode"
         static let providerConfigPrefix = "providerConfig."
     }
 
@@ -35,6 +36,10 @@ final class AppModel {
     /// The chosen engine's id: "duckduckgo", "tavily" or "exa". Held as well as written to
     /// `UserDefaults` so the pickers showing it redraw when it changes.
     private(set) var searchBackendId: String
+    /// How deeply a scan digs. Quick by default: someone researching hundreds of contacts is
+    /// the case that hurts, and thorough is half a minute each. Held here as well as in
+    /// `UserDefaults` so the two pickers showing it redraw when either changes it.
+    private(set) var scanMode: ScanMode
 
     /// Why the database on disk couldn't be opened, if it couldn't. `nil` in every normal case
     /// — including the one where an unopenable file was moved aside and a fresh one opened in
@@ -120,6 +125,7 @@ final class AppModel {
         self.embedder = embedder
         self.searchBackend = AppModel.makeSearchBackend(defaults: defaults, client: http)
         self.searchBackendId = defaults.string(forKey: Keys.searchBackend) ?? "duckduckgo"
+        self.scanMode = defaults.string(forKey: Keys.scanMode).flatMap(ScanMode.init(rawValue:)) ?? .quick
         self.setupCompleted = defaults.bool(forKey: Keys.hasCompletedSetup)
         self.providerId = defaults.string(forKey: Keys.selectedProviderId)
     }
@@ -275,10 +281,12 @@ final class AppModel {
         }
         defaults.removeObject(forKey: Keys.selectedProviderId)
         defaults.removeObject(forKey: Keys.searchBackend)
+        defaults.removeObject(forKey: Keys.scanMode)
         defaults.removeObject(forKey: Keys.hasCompletedSetup)
 
         providerId = nil
         searchBackendId = "duckduckgo"
+        scanMode = .quick
         searchBackend = AppModel.makeSearchBackend(defaults: defaults, client: http)
         setupCompleted = false
         detections = [:]
@@ -305,19 +313,28 @@ final class AppModel {
         )
     }
 
-    /// The full probe set, each one configured with whatever optional key the user has saved.
-    /// `UsernameProbe` is skipped (rather than crashing the scan) if the bundled
-    /// WhatsMyName dataset can't be read.
-    func makeScanner() -> ResearchScanner {
+    /// The full probe set, each one configured with whatever optional key the user has saved
+    /// and with how much work `mode` says a person is worth. `UsernameProbe` is skipped
+    /// (rather than crashing the scan) if the bundled WhatsMyName dataset can't be read.
+    ///
+    /// `mode` defaults to the saved one; it is a parameter at all so a caller with a mode in
+    /// hand — a screen that has just been switched — doesn't have to write it to
+    /// `UserDefaults` first and read it back.
+    func makeScanner(mode: ScanMode? = nil) -> ResearchScanner {
+        let mode = mode ?? scanMode
         var probes: [any Probe] = [
             GravatarProbe(apiKey: Keychain.get(account: "gravatar")),
             GitHubProbe(token: Keychain.get(account: "github")),
-            SearchProbe(backend: searchBackend),
+            SearchProbe(backend: searchBackend, mode: mode),
         ]
         if let dataset = try? WMNDataset.bundled() {
-            probes.append(UsernameProbe(dataset: dataset))
+            probes.append(UsernameProbe(
+                dataset: dataset,
+                maxSites: mode.usernameSites,
+                maxUsernames: mode.usernameCandidates
+            ))
         }
-        probes.append(PageFetchProbe())
+        probes.append(PageFetchProbe(maxPages: mode.pagesFetched))
         return ResearchScanner(store: store, probes: probes, client: http)
     }
 
@@ -372,6 +389,13 @@ final class AppModel {
     }
 
     // MARK: - Search backend
+
+    /// Saves how deeply the next scan digs. Written through the same way the engine is, so a
+    /// picker in Settings and one on the Scan screen agree the moment either is touched.
+    func setScanMode(_ mode: ScanMode) {
+        defaults.set(mode.rawValue, forKey: Keys.scanMode)
+        scanMode = mode
+    }
 
     /// Saves the chosen engine and rebuilds the backend around it, so the next scanner searches
     /// with it. An engine whose key is missing still falls back to DuckDuckGo underneath, which
