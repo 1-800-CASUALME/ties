@@ -42,8 +42,14 @@ public struct SourceSnapshot: Sendable {
         }
         var config = Configuration()
         config.readonly = true
-        let queue = try DatabaseQueue(path: dir.appendingPathComponent(url.lastPathComponent).path, configuration: config)
-        return SourceSnapshot(reader: queue, directory: dir)
+        do {
+            let queue = try DatabaseQueue(path: dir.appendingPathComponent(url.lastPathComponent).path, configuration: config)
+            return SourceSnapshot(reader: queue, directory: dir)
+        } catch {
+            // A torn or corrupt copy must not leave its temp directory behind.
+            try? fm.removeItem(at: dir)
+            throw SourceError.malformed("\(error)")
+        }
     }
 
     public func close() {
