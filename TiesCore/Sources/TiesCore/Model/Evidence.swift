@@ -4,12 +4,12 @@ public struct Evidence: Identifiable, Codable, Hashable, Sendable {
     public enum Kind: String, Codable, Sendable {
         case emailHash, phone, company, location, name, username, avatar, conflict
         /// The candidate's URL is one the person shared or signed with themselves.
-        case selfLink = "self_link"
+        case selfLink
         /// The candidate's display name matches an alias the person actually goes by, rather
         /// than the name stored in Contacts.
-        case selfName = "self_name"
+        case selfName
         /// The candidate's headline matches a job title from the person's mail signature.
-        case signatureTitle = "signature_title"
+        case signatureTitle
         /// The candidate's headline or snippet names a profession implied by an honorific
         /// other people use for the person ("Dr" → doctor, physician, PhD).
         case honorific
