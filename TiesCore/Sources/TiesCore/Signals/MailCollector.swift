@@ -8,9 +8,11 @@ import Foundation
 public struct MailCollector: SourceCollector {
     /// The 50 most recent messages per address (spec §3, "cap work per person").
     static let messageCap = 50
-    /// At or above this `NameMatcher.similarity` the `From` display name is just the person's
-    /// known name again, not another name they go by.
-    static let aliasGate = 0.9
+
+    /// What `status()` says after a run that came back empty because Spotlight had no index for
+    /// the mailbox and the mailbox is too large to walk by hand — the one case where "no signals"
+    /// means "we could not look", and the UI has to be able to say so.
+    public static let indexMissingMessage = "Mail index found nothing; mailbox too large to scan"
 
     public static let defaultRoot = URL(fileURLWithPath: NSHomeDirectory() + "/Library/Mail")
 
@@ -19,15 +21,34 @@ public struct MailCollector: SourceCollector {
 
     private let index: any MailIndex
     private let root: URL
+    /// Above this many `.emlx` files, the directory walk that stands in for a missing Spotlight
+    /// index is not attempted (`SpotlightMailIndex` applies the same ceiling).
+    private let fallbackCeiling: Int
+    /// What the last run concluded, so `status()` can report it afterwards.
+    private let outcome = Outcome()
 
     public init(index: any MailIndex = SpotlightMailIndex(), root: URL = MailCollector.defaultRoot) {
+        self.init(index: index, root: root, fallbackCeiling: SpotlightMailIndex.directoryFallbackLimit)
+    }
+
+    init(index: any MailIndex, root: URL, fallbackCeiling: Int) {
         self.index = index
         self.root = root
+        self.fallbackCeiling = fallbackCeiling
     }
 
     // MARK: - Status
 
+    /// Where the mailbox stands: the file system's answer, unless the last run ended in the one
+    /// state the file system cannot see — a mailbox that is there and readable but that neither
+    /// Spotlight nor a directory walk could answer for.
     public func status() -> SourceStatus {
+        let onDisk = fileSystemStatus()
+        guard case .ready = onDisk, let recorded = outcome.value else { return onDisk }
+        return recorded
+    }
+
+    private func fileSystemStatus() -> SourceStatus {
         let fileManager = FileManager.default
         guard fileManager.fileExists(atPath: root.path) else { return .unavailable }
         guard fileManager.isReadableFile(atPath: root.path) else { return .needsAccess }
@@ -46,7 +67,12 @@ public struct MailCollector: SourceCollector {
         #if DEBUG
         visits.reset()
         #endif
+        // This run's own verdict replaces the last one's, so a mailbox that has since been
+        // indexed stops reporting the old complaint.
+        outcome.record(nil)
 
+        // Ask the file system first: without Full Disk Access the mailbox is not merely
+        // unreadable, it is invisible, and an open-first read would call that "not installed".
         switch status() {
         case .unavailable: throw SourceError.unavailable
         case .needsAccess: throw SourceError.needsAccess
@@ -58,7 +84,10 @@ public struct MailCollector: SourceCollector {
         guard !input.emails.isEmpty else { return signals }
 
         let messages = try await read(for: input, since: since)
-        guard !messages.isEmpty else { return signals }
+        guard !messages.isEmpty else {
+            if mailboxIsTooLargeToWalk() { outcome.record(.error(Self.indexMissingMessage)) }
+            return signals
+        }
         signals.sources = ["mail"]
 
         let addresses = Set(input.emails.map { $0.lowercased() })
@@ -107,17 +136,35 @@ public struct MailCollector: SourceCollector {
         return messages
     }
 
+    /// Whether the mailbox is past the ceiling above which a missing Spotlight index cannot be
+    /// stood in for by reading the files. Only asked when a run found nothing, which is the only
+    /// time the answer changes what the user is told.
+    private func mailboxIsTooLargeToWalk() -> Bool {
+        DirectoryMailIndex.emlxFiles(in: root, limit: fallbackCeiling + 1).count > fallbackCeiling
+    }
+
     /// A `From` display name is an alias only when it isn't the name the Mac already has.
     private func alias(from displayName: String?, knownAs name: String) -> String? {
         guard let candidate = displayName?.trimmingCharacters(in: .whitespaces), !candidate.isEmpty else {
             return nil
         }
-        guard NameMatcher.similarity(personName: name, candidateName: candidate) < Self.aliasGate else { return nil }
+        guard NameMatcher.similarity(personName: name, candidateName: candidate) < SignalRules.aliasNameGate
+        else { return nil }
         return candidate
     }
 
     private func add(_ values: [String], to target: inout [String]) {
         for value in values where !target.contains(value) { target.append(value) }
+    }
+
+    /// The last run's verdict, in a reference box because the collector is a `Sendable` value
+    /// shared across the people of a run.
+    private final class Outcome: @unchecked Sendable {
+        private let lock = NSLock()
+        private var status: SourceStatus?
+
+        var value: SourceStatus? { lock.withLock { status } }
+        func record(_ status: SourceStatus?) { lock.withLock { self.status = status } }
     }
 
     // MARK: - Test support

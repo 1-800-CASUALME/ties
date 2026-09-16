@@ -3,9 +3,9 @@ import GRDB
 @testable import TiesCore
 
 /// A miniature `chat.db` written from scratch: the handful of tables and columns
-/// `MessagesCollector` reads, filled with one group chat between the person, one other
-/// participant, and a pile of old filler so the 500-message cap and the 365-day window have
-/// something to bite on. Never touches the real Messages store.
+/// `MessagesCollector` reads, filled with a group chat between the person, one other participant
+/// and the user, a one-to-one chat with the person, and a pile of old filler so the 500-message
+/// cap and the 365-day window have something to bite on. Never touches the real Messages store.
 enum ChatDBFixture {
     /// The handle the tests hand to the collector as the person's phone channel.
     static let personHandle = "+966501234567"
@@ -15,8 +15,16 @@ enum ChatDBFixture {
     static let groupName = "Acme Inc"
     /// Messages older than a year, all from the person.
     static let fillerCount = 600
-    /// Recent messages: three from the other participant, one from the person.
-    static let recentCount = 4
+    /// Recent messages: three from the other participant in the group, one from the person
+    /// there, and the two lines of the one-to-one chat.
+    static let recentCount = 6
+
+    /// Messages that count as contact with the person: her own group message, and both lines of
+    /// the one-to-one chat. The group's other participant talking is not contact with her.
+    static let expectedInteractions = 3
+
+    /// How long ago the newest message involving the person was sent.
+    static let lastContactDaysAgo: Double = 2
 
     /// Creates `chat.db` inside `directory` and returns its URL.
     static func make(at directory: URL) throws -> URL {
@@ -52,9 +60,11 @@ enum ChatDBFixture {
     private static func rows(_ db: Database) throws {
         try db.execute(sql: "INSERT INTO handle (ROWID, id) VALUES (1, ?), (2, ?)",
                        arguments: [personHandle, otherHandle])
-        try db.execute(sql: "INSERT INTO chat (ROWID, chat_identifier, display_name) VALUES (1, ?, ?)",
-                       arguments: ["chat123456", groupName])
-        try db.execute(sql: "INSERT INTO chat_handle_join (chat_id, handle_id) VALUES (1, 1), (1, 2)")
+        // Chat 1 is a group (two other participants); chat 2 is the one-to-one with the person,
+        // which is what makes "both directions" distinguishable from "group traffic".
+        try db.execute(sql: "INSERT INTO chat (ROWID, chat_identifier, display_name) VALUES (1, ?, ?), (2, ?, NULL)",
+                       arguments: ["chat123456", groupName, personHandle])
+        try db.execute(sql: "INSERT INTO chat_handle_join (chat_id, handle_id) VALUES (1, 1), (1, 2), (2, 1)")
 
         // Dated relative to now, not to a literal 2026-08-01, so the 365-day window keeps
         // meaning the same thing whenever the suite is run.
@@ -64,6 +74,10 @@ enum ChatDBFixture {
         // blob, which the collector has to unwrap.
         try insert(db, id: 3, handle: 2, body: TypedStreamFixture.archive("Dr. Sara said yes"), daysAgo: 44)
         try insert(db, id: 4, handle: 1, text: "my profile https://www.linkedin.com/in/sara-ahmed/", daysAgo: 43)
+
+        // The one-to-one chat, one line each way.
+        try insert(db, id: 700, chat: 2, handle: 1, text: "see you tomorrow", daysAgo: 3)
+        try insert(db, id: 701, chat: 2, handle: 1, text: "ok", daysAgo: lastContactDaysAgo, fromMe: true)
 
         for index in 0..<fillerCount {
             // Older rows use Apple's legacy seconds-since-2001 timestamps; the collector has to
@@ -76,22 +90,25 @@ enum ChatDBFixture {
     private static func insert(
         _ db: Database,
         id: Int,
+        chat: Int = 1,
         handle: Int,
         text: String? = nil,
         body: Data? = nil,
         daysAgo: Double,
-        seconds: Bool = false
+        seconds: Bool = false,
+        fromMe: Bool = false
     ) throws {
         let elapsed = Date.now.addingTimeInterval(-daysAgo * 86_400).timeIntervalSinceReferenceDate
         let date = seconds ? Int64(elapsed) : Int64(elapsed * 1_000_000_000)
         try db.execute(
             sql: """
                 INSERT INTO message (ROWID, text, attributedBody, handle_id, is_from_me, date, cache_roomnames)
-                VALUES (?, ?, ?, ?, 0, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-            arguments: [id, text, body, handle, date, groupName]
+            arguments: [id, text, body, handle, fromMe ? 1 : 0, date, chat == 1 ? groupName : nil]
         )
-        try db.execute(sql: "INSERT INTO chat_message_join (chat_id, message_id) VALUES (1, ?)", arguments: [id])
+        try db.execute(sql: "INSERT INTO chat_message_join (chat_id, message_id) VALUES (?, ?)",
+                       arguments: [chat, id])
     }
 }
 
@@ -123,6 +140,16 @@ enum TypedStreamFixture {
 
     /// An `attributedBody` with no string payload at all.
     static let withoutMarker = Data([0x04, 0x0B] + Array("streamtyped".utf8) + [0x81, 0xE8, 0x03, 0x84])
+
+    /// An archive cut off immediately after the `NSString` class marker: the parser has to run
+    /// out of bytes rather than off the end of the buffer.
+    static let truncatedAfterMarker = Data(Array("streamtyped".utf8) + Array("NSString".utf8))
+
+    /// Cut off after the type run that opens the payload, so even the length byte is missing.
+    static let truncatedBeforeLength = Data(Array("NSString".utf8) + [0x01, 0x94, 0x84, 0x01, 0x2B])
+
+    /// The length byte promises more payload than the archive carries.
+    static let truncatedPayload = Data(Array("NSString".utf8) + [0x01, 0x94, 0x84, 0x01, 0x2B, 0x40] + Array("short".utf8))
 
     /// Builds an archive for arbitrary text, picking the length encoding the way Messages does.
     static func archive(_ text: String) -> Data {

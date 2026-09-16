@@ -32,6 +32,47 @@ private func sara() -> ProbeInput {
     #expect(signals.honorifics == ["dr"])
 }
 
+@Test func groupNamesThatReadLikeACompany() async throws {
+    let store = try WhatsAppFixture.make()
+    let signals = try await WhatsAppCollector(chatStorage: store).collect(for: sara(), since: nil)
+
+    // "Clinic Team" names an organisation; her one-to-one chats are named after people.
+    #expect(signals.companies == [WhatsAppFixture.groupName])
+}
+
+@Test func groupsAreFoundWithoutAMembershipTable() async throws {
+    let store = try WhatsAppFixture.make(groupMembers: false)
+    let signals = try await WhatsAppCollector(chatStorage: store).collect(for: sara(), since: nil)
+
+    // ZWAGROUPMEMBER is empty, so the group is recognised only by the messages she wrote in it —
+    // and everything it contributes still arrives.
+    #expect(signals.honorifics == ["dr"])
+    #expect(signals.aliases == ["Dr Sara A", "Sarita"])
+    #expect(signals.companies == [WhatsAppFixture.groupName])
+}
+
+@Test func aSessionCopiesTheStoreOnce() async throws {
+    let store = try WhatsAppFixture.make()
+
+    let session = WhatsAppCollector(chatStorage: store)
+    try await session.beginSession()
+    _ = try await session.collect(for: sara(), since: nil)
+    let second = try await session.collect(for: sara(), since: nil)
+    #expect(session.snapshotsOpened == 1)
+    #expect(second.aliases == ["Dr Sara A", "Sarita"])
+    await session.endSession()
+
+    let loose = WhatsAppCollector(chatStorage: store)
+    _ = try await loose.collect(for: sara(), since: nil)
+    _ = try await loose.collect(for: sara(), since: nil)
+    #expect(loose.snapshotsOpened == 2)
+}
+
+@Test func beginningASessionOnAMissingStoreThrows() async {
+    let missing = WhatsAppCollector(chatStorage: URL(fileURLWithPath: "/nonexistent/ChatStorage.sqlite"))
+    await #expect(throws: SourceError.self) { try await missing.beginSession() }
+}
+
 @Test func linksFromOwnMessages() async throws {
     let store = try WhatsAppFixture.make()
     let signals = try await WhatsAppCollector(chatStorage: store).collect(for: sara(), since: nil)

@@ -14,15 +14,15 @@ public struct WhatsAppCollector: SourceCollector {
     /// The window `interactions` counts over.
     static let interactionWindow: TimeInterval = 365 * 86_400
 
-    /// At or above this `NameMatcher.similarity`, a push name is the Contacts name again rather
-    /// than another name the person goes by.
-    static let pushNameGate = 0.9
-
     /// WhatsApp's own suffix for a one-to-one address, and for a group's.
     static let userSuffix = "@s.whatsapp.net"
     static let groupSuffix = "@g.us"
 
     public let chatStorage: URL
+
+    /// The one snapshot a whole collection run shares, so a large `ChatStorage.sqlite` is copied
+    /// once rather than once per person.
+    private let session = SnapshotSession()
 
     public init(
         chatStorage: URL = URL(
@@ -37,10 +37,29 @@ public struct WhatsAppCollector: SourceCollector {
     public var displayName: String { "WhatsApp" }
 
     public func status() -> SourceStatus {
-        let fm = FileManager.default
-        guard fm.fileExists(atPath: chatStorage.path) else { return .unavailable }
-        guard fm.isReadableFile(atPath: chatStorage.path) else { return .needsAccess }
-        return .ready
+        .ofFile(at: chatStorage)
+    }
+
+    // MARK: - Session
+
+    /// Copies the store once for the whole run. Reports the same errors `collect` would.
+    public func beginSession() async throws {
+        try check(status())
+        try session.begin(chatStorage)
+    }
+
+    public func endSession() async {
+        session.end()
+    }
+
+    /// Turns a status into the error `collect`/`beginSession` throw for it.
+    private func check(_ status: SourceStatus) throws {
+        switch status {
+        case .ready: return
+        case .unavailable: throw SourceError.unavailable
+        case .needsAccess: throw SourceError.needsAccess
+        case .error(let message): throw SourceError.malformed(message)
+        }
     }
 
     /// WhatsApp addresses a phone by its E.164 digits without the `+`, so `+966501234567`
@@ -56,16 +75,27 @@ public struct WhatsAppCollector: SourceCollector {
         // No phone number means no WhatsApp address to look for; don't even copy the store.
         guard !jids.isEmpty else { return empty }
 
-        switch status() {
-        case .unavailable: throw SourceError.unavailable
-        case .needsAccess: throw SourceError.needsAccess
-        case .error(let message): throw SourceError.malformed(message)
-        case .ready: break
+        // Ask first: without Full Disk Access the store's own existence is hidden, so opening it
+        // first would report a missing store where access is what is missing.
+        try check(status())
+
+        // Inside a run the session's snapshot is reused; on its own, `collect` copies the store
+        // for this one call and closes the copy again.
+        if let snapshot = session.current {
+            return try await read(from: snapshot, jids: jids, input: input, since: since, empty: empty)
         }
-
-        let snapshot = try SourceSnapshot.open(chatStorage)
+        let snapshot = try session.single(chatStorage)
         defer { snapshot.close() }
+        return try await read(from: snapshot, jids: jids, input: input, since: since, empty: empty)
+    }
 
+    private func read(
+        from snapshot: SourceSnapshot,
+        jids: [String],
+        input: ProbeInput,
+        since: Date?,
+        empty: LocalSignals
+    ) async throws -> LocalSignals {
         do {
             return try await snapshot.reader.read { db in
                 try read(db, jids: jids, input: input, since: since, empty: empty)
@@ -99,10 +129,13 @@ public struct WhatsAppCollector: SourceCollector {
         let text = try messageText(db, jids: Set(jids), sessions: sessions, since: since)
         signals.honorifics = SignalRules.honorifics(in: text.byOtherMembers, names: names)
         signals.aliases = Self.union(
-            pushNames.filter { NameMatcher.similarity(personName: input.fullName, candidateName: $0) < Self.pushNameGate },
+            pushNames.filter {
+                NameMatcher.similarity(personName: input.fullName, candidateName: $0) < SignalRules.aliasNameGate
+            },
             SignalRules.aliases(in: text.byOtherMembers, names: names)
         )
         signals.links = SignalRules.links(in: text.byPerson)
+        signals.companies = try companies(db, groups: sessions.group)
 
         let tally = try tally(db, jids: jids, direct: sessions.direct, since: since)
         signals.lastContact = tally.lastContact
@@ -113,16 +146,29 @@ public struct WhatsAppCollector: SourceCollector {
     /// The person's chat sessions, split into the groups they are a member of and the one-to-one
     /// chats addressed to them. A session is a group when Core Data says so (`ZSESSIONTYPE == 1`)
     /// or when its address is a group address.
+    ///
+    /// Membership comes from `ZWAGROUPMEMBER`, plus a fallback for the stores where that table is
+    /// absent or empty (WhatsApp prunes it, and then a group the person is plainly in would be
+    /// invisible): a session holding a message whose `ZFROMJID` is theirs is a session they are
+    /// in, whatever the membership table says.
     private func sessionIds(_ db: Database, jids: [String]) throws -> (group: Set<Int64>, direct: Set<Int64>) {
         let list = Self.placeholders(jids.count)
+        var clauses = ["ZCONTACTJID IN (\(list))"]
+        var arguments = jids
+        if try db.tableExists("ZWAGROUPMEMBER") {
+            clauses.append("Z_PK IN (SELECT ZCHATSESSION FROM ZWAGROUPMEMBER WHERE ZMEMBERJID IN (\(list)))")
+            arguments += jids
+        }
+        clauses.append("Z_PK IN (SELECT ZCHATSESSION FROM ZWAMESSAGE WHERE ZFROMJID IN (\(list)))")
+        arguments += jids
+
         let rows = try Row.fetchAll(
             db,
             sql: """
                 SELECT Z_PK, ZCONTACTJID, ZSESSIONTYPE FROM ZWACHATSESSION
-                WHERE ZCONTACTJID IN (\(list))
-                   OR Z_PK IN (SELECT ZCHATSESSION FROM ZWAGROUPMEMBER WHERE ZMEMBERJID IN (\(list)))
+                WHERE \(clauses.joined(separator: " OR "))
                 """,
-            arguments: StatementArguments(jids + jids)
+            arguments: StatementArguments(arguments)
         )
 
         var group: Set<Int64> = []
@@ -138,6 +184,25 @@ public struct WhatsAppCollector: SourceCollector {
             }
         }
         return (group, direct)
+    }
+
+    /// The names of the person's groups that read like an organisation ("Clinic Team"), by the
+    /// same rule `MessagesCollector` applies to a group chat's display name.
+    private func companies(_ db: Database, groups: Set<Int64>) throws -> [String] {
+        guard !groups.isEmpty else { return [] }
+        let names = try String.fetchAll(
+            db,
+            sql: """
+                SELECT ZPARTNERNAME FROM ZWACHATSESSION
+                WHERE Z_PK IN (\(Self.placeholders(groups.count)))
+                  AND ZPARTNERNAME IS NOT NULL AND TRIM(ZPARTNERNAME) <> ''
+                """,
+            arguments: StatementArguments(groups.sorted())
+        )
+        return Self.union(
+            names.map { $0.trimmingCharacters(in: .whitespaces) }.filter(SignalRules.looksLikeCompany),
+            []
+        )
     }
 
     /// The display names the person set for themselves, first-seen order, duplicates dropped.
@@ -235,6 +300,14 @@ public struct WhatsAppCollector: SourceCollector {
         let recent: Int? = row["recent"]
         return (last.map(Date.init(timeIntervalSinceReferenceDate:)), recent ?? 0)
     }
+
+    // MARK: - Test support
+
+    #if DEBUG
+    /// How many snapshots of `ChatStorage.sqlite` this collector has opened: one for a whole
+    /// run bracketed by `beginSession()`/`endSession()`, otherwise one per `collect`.
+    public var snapshotsOpened: Int { session.snapshotsOpened }
+    #endif
 
     // MARK: - Helpers
 

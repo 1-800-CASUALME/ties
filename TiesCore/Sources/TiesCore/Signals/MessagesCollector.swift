@@ -16,12 +16,28 @@ public struct MessagesCollector: SourceCollector {
     /// The user's own names, so the user's name never becomes an alias for someone else.
     public let userNames: [String]
 
+    /// The one snapshot a whole collection run shares (spec §3: a multi-gigabyte `chat.db` is
+    /// copied once, not once per person).
+    private let session = SnapshotSession()
+
     public init(
         chatDB: URL = URL(fileURLWithPath: NSHomeDirectory() + "/Library/Messages/chat.db"),
         userNames: [String]
     ) {
         self.chatDB = chatDB
         self.userNames = userNames
+    }
+
+    // MARK: - Session
+
+    /// Copies `chat.db` once for the whole run. Reports the same errors `collect` would.
+    public func beginSession() async throws {
+        try check(status())
+        try session.begin(chatDB)
+    }
+
+    public func endSession() async {
+        session.end()
     }
 
     // MARK: - Status
@@ -33,14 +49,7 @@ public struct MessagesCollector: SourceCollector {
     /// merely refuse to open: `stat` is denied too, so "file not found" and "not allowed" look
     /// alike until the error itself is read.
     public func status() -> SourceStatus {
-        do {
-            let handle = try FileHandle(forReadingFrom: chatDB)
-            try? handle.close()
-            return .ready
-        } catch {
-            if SourceSnapshot.isPermissionError(error) { return .needsAccess }
-            return FileManager.default.fileExists(atPath: chatDB.path) ? .needsAccess : .unavailable
-        }
+        .ofFile(at: chatDB)
     }
 
     // MARK: - Collection
@@ -53,15 +62,24 @@ public struct MessagesCollector: SourceCollector {
 
         // Ask first, so a store that is only hidden by a missing Full Disk Access grant is
         // reported as needing access rather than as missing.
-        switch status() {
-        case .ready: break
-        case .needsAccess: throw SourceError.needsAccess
-        case .unavailable: throw SourceError.unavailable
-        case .error(let message): throw SourceError.malformed(message)
-        }
+        try check(status())
 
-        let snapshot = try SourceSnapshot.open(chatDB)
+        // Inside a run the snapshot the session opened is reused; on its own, `collect` copies
+        // the store for this one call and closes the copy again.
+        if let snapshot = session.current {
+            return try await read(input: input, handles: handles, since: since, from: snapshot)
+        }
+        let snapshot = try session.single(chatDB)
         defer { snapshot.close() }
+        return try await read(input: input, handles: handles, since: since, from: snapshot)
+    }
+
+    private func read(
+        input: ProbeInput,
+        handles: [String],
+        since: Date?,
+        from snapshot: SourceSnapshot
+    ) async throws -> LocalSignals {
         do {
             return try await snapshot.reader.read { db in
                 try signals(for: input, handles: Array(Set(handles)).sorted(), since: since, in: db)
@@ -71,6 +89,16 @@ public struct MessagesCollector: SourceCollector {
         } catch {
             // A chat.db we can't read the way we expect is malformed, not a crash.
             throw SourceError.malformed(error.localizedDescription)
+        }
+    }
+
+    /// Turns a status into the error `collect`/`beginSession` throw for it.
+    private func check(_ status: SourceStatus) throws {
+        switch status {
+        case .ready: return
+        case .needsAccess: throw SourceError.needsAccess
+        case .unavailable: throw SourceError.unavailable
+        case .error(let message): throw SourceError.malformed(message)
         }
     }
 
@@ -88,6 +116,7 @@ public struct MessagesCollector: SourceCollector {
             sql: "SELECT DISTINCT chat_id FROM chat_handle_join WHERE handle_id IN (\(Self.placeholders(handleIds.count)))",
             arguments: StatementArguments(handleIds)
         )
+        let directChatIds = try oneToOneChats(among: chatIds, in: db)
 
         // Everything the person said, plus everything said in the chats they are in — that is
         // where other people address them by name.
@@ -106,7 +135,7 @@ public struct MessagesCollector: SourceCollector {
             db,
             sql: """
                 SELECT m.text AS text, m.attributedBody AS attributedBody, m.handle_id AS handleId,
-                       m.is_from_me AS isFromMe, m.date AS date
+                       m.is_from_me AS isFromMe
                 FROM message m
                 LEFT JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
                 WHERE \(scope)
@@ -117,17 +146,14 @@ public struct MessagesCollector: SourceCollector {
             arguments: scopeArguments
         )
         #if DEBUG
-        Self.lastVisited = rows.count
+        visits.record(rows.count)
         #endif
         guard !rows.isEmpty else { return empty }
 
         let personHandles = Set(handleIds)
         var byOthers: [String] = []
         var byPerson: [String] = []
-        var dates: [Date] = []
         for row in rows {
-            let raw: Int64 = row["date"] ?? 0
-            if let date = Self.date(fromAppleTime: raw) { dates.append(date) }
             // The user's own messages say nothing about how the person is seen, and their links
             // are the user's own.
             let isFromMe: Bool = row["isFromMe"] ?? false
@@ -145,7 +171,7 @@ public struct MessagesCollector: SourceCollector {
             .filter { !$0.isEmpty }
         let othersText = byOthers.joined(separator: "\n")
         let companies = try companies(chatIds: chatIds, in: db)
-        let interactions = try interactions(scope: scope, arguments: scopeArguments, in: db)
+        let tally = try tally(handleIds: handleIds, directChatIds: directChatIds, since: since, in: db)
 
         return LocalSignals(
             personId: input.person.id,
@@ -153,30 +179,74 @@ public struct MessagesCollector: SourceCollector {
             honorifics: SignalRules.honorifics(in: othersText, names: names),
             companies: companies,
             links: SignalRules.links(in: byPerson.joined(separator: "\n")),
-            lastContact: dates.max(),
-            interactions: interactions,
+            lastContact: tally.lastContact,
+            interactions: tally.interactions,
             sources: [id]
         )
     }
 
-    /// Messages in either direction in the last 365 days. Counted in SQL rather than from the
-    /// capped read, so a busy year isn't reported as 500 messages.
-    private func interactions(scope: String, arguments: StatementArguments, in db: Database) throws -> Int {
-        var arguments = arguments
-        arguments += [Date.now.addingTimeInterval(-Self.interactionWindow).timeIntervalSinceReferenceDate]
-        return try Int.fetchOne(
+    /// The chats among `chatIds` with exactly one other participant — the person's one-to-one
+    /// threads. Everything else they are in is a group, where the other members' chatter is not
+    /// contact with them.
+    private func oneToOneChats(among chatIds: [Int64], in db: Database) throws -> [Int64] {
+        guard !chatIds.isEmpty else { return [] }
+        return try Int64.fetchAll(
             db,
             sql: """
-                SELECT COUNT(*) FROM (
-                    SELECT m.ROWID
+                SELECT chat_id FROM chat_handle_join
+                WHERE chat_id IN (\(Self.placeholders(chatIds.count)))
+                GROUP BY chat_id HAVING COUNT(DISTINCT handle_id) = 1
+                """,
+            arguments: StatementArguments(chatIds)
+        )
+    }
+
+    /// `lastContact` and `interactions` over the messages that are actually *with* the person:
+    /// anything they wrote, plus both directions of their one-to-one chats (the same rule
+    /// `WhatsAppCollector` counts by). A group chat's other members talking among themselves is
+    /// not an interaction with the person, so a busy group no longer inflates their count.
+    ///
+    /// Counted in SQL rather than from the capped read, so a busy year isn't reported as 500
+    /// messages, and de-duplicated by `ROWID` so a message in two chats counts once.
+    private func tally(
+        handleIds: [Int64],
+        directChatIds: [Int64],
+        since: Date?,
+        in db: Database
+    ) throws -> (lastContact: Date?, interactions: Int) {
+        var involved = ["(m.is_from_me = 0 AND m.handle_id IN (\(Self.placeholders(handleIds.count))))"]
+        var arguments: [any DatabaseValueConvertible] = handleIds
+        if !directChatIds.isEmpty {
+            involved.append("cmj.chat_id IN (\(Self.placeholders(directChatIds.count)))")
+            arguments += directChatIds
+        }
+        // An incremental pass counts only what it read, so merged signals stay additive.
+        let window = max(since ?? .distantPast, Date.now.addingTimeInterval(-Self.interactionWindow))
+        var sinceClause = ""
+        var sinceArguments: [any DatabaseValueConvertible] = []
+        if let since {
+            sinceClause = " AND \(Self.secondsSince2001) >= ?"
+            sinceArguments = [since.timeIntervalSinceReferenceDate]
+        }
+
+        let row = try Row.fetchOne(
+            db,
+            sql: """
+                SELECT MAX(at) AS last, SUM(recent) AS recent FROM (
+                    SELECT \(Self.secondsSince2001) AS at,
+                           CASE WHEN \(Self.secondsSince2001) >= ? THEN 1 ELSE 0 END AS recent
                     FROM message m
                     LEFT JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
-                    WHERE \(scope) AND \(Self.secondsSince2001) >= ?
+                    WHERE (\(involved.joined(separator: " OR ")))\(sinceClause)
                     GROUP BY m.ROWID
                 )
                 """,
-            arguments: arguments
-        ) ?? 0
+            arguments: StatementArguments(
+                [window.timeIntervalSinceReferenceDate] + arguments + sinceArguments
+            )
+        )
+        guard let row, let last: Double = row["last"] else { return (nil, row?["recent"] ?? 0) }
+        return (Date(timeIntervalSinceReferenceDate: last), row["recent"] ?? 0)
     }
 
     /// Group-chat names that read like an organisation ("Acme Inc", "شركة النور").
@@ -193,7 +263,7 @@ public struct MessagesCollector: SourceCollector {
         )
         var found: [String] = []
         for name in names.map({ $0.trimmingCharacters(in: .whitespaces) })
-        where Self.looksLikeCompany(name) && !found.contains(name) {
+        where SignalRules.looksLikeCompany(name) && !found.contains(name) {
             found.append(name)
         }
         return found
@@ -216,13 +286,24 @@ public struct MessagesCollector: SourceCollector {
     static let secondsSince2001 =
         "(CASE WHEN m.date < \(nanosecondThreshold) THEN m.date ELSE m.date / 1000000000 END)"
 
-    /// Group names holding one of these tokens name an organisation rather than a group of
-    /// friends.
-    private static let companyTokens: Set<String> = ["inc", "llc", "ltd", "team", "co", "شركة"]
-
     #if DEBUG
-    /// How many message rows the last collection read — the cap, proved.
-    nonisolated(unsafe) static var lastVisited = 0
+    /// How many message rows this collector's last `collect(for:since:)` read — how the cap is
+    /// asserted without a counting database. Per collector, not global, so tests running in
+    /// parallel don't overwrite each other's count.
+    public var lastVisited: Int { visits.value }
+
+    /// How many snapshots of `chat.db` this collector has opened.
+    public var snapshotsOpened: Int { session.snapshotsOpened }
+
+    private let visits = Visits()
+
+    private final class Visits: @unchecked Sendable {
+        private let lock = NSLock()
+        private var visited = 0
+
+        var value: Int { lock.withLock { visited } }
+        func record(_ count: Int) { lock.withLock { visited = count } }
+    }
     #endif
 
     /// A message's words: `text` when Messages stored it, otherwise the typedstream payload.
@@ -230,18 +311,6 @@ public struct MessagesCollector: SourceCollector {
         if let text: String = row["text"], !text.trimmingCharacters(in: .whitespaces).isEmpty { return text }
         guard let body: Data = row["attributedBody"] else { return nil }
         return TypedStream.text(from: body)
-    }
-
-    static func date(fromAppleTime raw: Int64) -> Date? {
-        guard raw > 0 else { return nil }
-        let seconds = raw < nanosecondThreshold ? Double(raw) : Double(raw) / 1_000_000_000
-        return Date(timeIntervalSinceReferenceDate: seconds)
-    }
-
-    static func looksLikeCompany(_ name: String) -> Bool {
-        name.split(whereSeparator: { $0.isWhitespace || $0 == "," })
-            .map { $0.trimmingCharacters(in: .punctuationCharacters).lowercased() }
-            .contains { companyTokens.contains($0) }
     }
 
     /// `?, ?, ?` for an `IN` list — `NULL` when there is nothing to match, which `IN` reads as

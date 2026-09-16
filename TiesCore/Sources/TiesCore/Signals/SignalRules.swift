@@ -37,8 +37,14 @@ public enum SignalRules {
     static let aliasProximity = 40
 
     /// Above this `NameMatcher.similarity`, a candidate is just the person's known name again
-    /// rather than an alias for it.
-    static let aliasNameGate = 0.85
+    /// rather than an alias for it. The one gate for every "is this only their name?" decision:
+    /// the alias rule below, the WhatsApp push name, the Contacts nickname, and the `From`
+    /// display name in mail all ask it, so one answer cannot disagree with another.
+    public static let aliasNameGate = 0.9
+
+    /// A name holding one of these tokens names an organisation rather than a person or a group
+    /// of friends — the rule behind `looksLikeCompany`.
+    private static let companyTokens: Set<String> = ["inc", "llc", "ltd", "team", "co", "شركة"]
 
     /// The most lines of a mail body tail that can make up a signature block.
     static let signatureLineLimit = 8
@@ -293,6 +299,18 @@ public enum SignalRules {
 
     /// Identity hosts whose profile URLs are worth keeping whatever their casing or scheme.
     private static let identityHosts = ["linkedin.com", "x.com", "twitter.com", "github.com"]
+
+    // MARK: - Chat names
+
+    /// True when a chat or group name reads like an organisation ("Acme Inc", "Clinic Team",
+    /// "شركة النور") rather than a group of friends. Messages reads it off `chat.display_name`
+    /// and WhatsApp off `ZWACHATSESSION.ZPARTNERNAME`, so the rule lives here rather than in
+    /// either collector.
+    public static func looksLikeCompany(_ name: String) -> Bool {
+        name.split(whereSeparator: { $0.isWhitespace || $0 == "," })
+            .map { $0.trimmingCharacters(in: .punctuationCharacters).lowercased() }
+            .contains { companyTokens.contains($0) }
+    }
 
     // MARK: - Helpers
 
