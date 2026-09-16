@@ -23,6 +23,9 @@ public struct ScanProgress: Sendable, Equatable {
     /// The probes already finished for `currentName`, in order, by `displayName`. Empty until
     /// the first one completes; reset for every person.
     public var finishedStages: [String]
+    /// A run-level warning worth showing above the progress, e.g. that web search has been
+    /// switched off after repeated challenges. `nil` when there is nothing to say.
+    public var notice: String?
 
     public init(
         completed: Int,
@@ -31,7 +34,8 @@ public struct ScanProgress: Sendable, Equatable {
         waitingFor: String? = nil,
         finished: Bool = false,
         stage: String? = nil,
-        finishedStages: [String] = []
+        finishedStages: [String] = [],
+        notice: String? = nil
     ) {
         self.completed = completed
         self.total = total
@@ -40,5 +44,6 @@ public struct ScanProgress: Sendable, Equatable {
         self.finished = finished
         self.stage = stage
         self.finishedStages = finishedStages
+        self.notice = notice
     }
 }
