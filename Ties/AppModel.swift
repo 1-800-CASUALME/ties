@@ -41,6 +41,22 @@ final class AppModel {
     /// needs it.
     var detections: [String: DetectResult] = [:]
 
+    /// Who the main window has selected, so menu commands — which have no view of their own —
+    /// know whether "Refresh Selected" has anything to act on.
+    var selectedPersonId: String?
+
+    /// Menu commands act on the main window, which owns the sheets and the refresh. Each of
+    /// these is bumped by the command and watched by the window; a counter rather than a flag
+    /// so pressing the same command twice in a row lands twice.
+    var newPersonRequest = 0
+    var refreshRequest = 0
+
+    /// Where the setup wizard should open when it is shown again. `nil` starts it from the
+    /// beginning, which is what a first run (or a wiped database) wants; Settings' "Add more
+    /// contacts…" sets it to `.select` so the wizard reopens at the contact picker instead.
+    /// Deliberately not persisted: it describes one trip through setup, not a preference.
+    var resumeWizardStep: WizardStep?
+
     private var setupCompleted: Bool
     private var providerId: String?
     private let defaults: UserDefaults
@@ -101,6 +117,14 @@ final class AppModel {
         } catch {
             embedder = HashEmbedder()
         }
+    }
+
+    /// Re-enters setup at the contact picker, keeping everything already researched. Everyone
+    /// imported is already in the store, so the picker simply reopens with the ones that were
+    /// skipped the first time still unticked.
+    func addMoreContacts() {
+        resumeWizardStep = .select
+        hasCompletedSetup = false
     }
 
     // MARK: - Factories

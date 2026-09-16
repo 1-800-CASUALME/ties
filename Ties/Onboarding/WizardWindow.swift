@@ -3,7 +3,15 @@ import SwiftUI
 /// The first-run setup shell: one screen at a time, pushed left or right, over a bottom bar
 /// with the step dots and a Back button.
 struct WizardWindow: View {
-    @State private var state = WizardState()
+    @State private var state: WizardState
+
+    /// Setup normally starts at the beginning. The one exception is "Add more contacts…", which
+    /// reopens it at the contact picker over a database that is already full.
+    init(startingAt step: WizardStep = .welcome) {
+        let state = WizardState()
+        state.step = step
+        _state = State(initialValue: state)
+    }
 
     var body: some View {
         ZStack {
