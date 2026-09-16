@@ -66,9 +66,28 @@ struct MainWindow: View {
                 // A different person is a different screen's worth of state — note, profile,
                 // an in-flight refresh — not the same screen with new values in it.
                 .id(person.id)
+        } else if people.isEmpty {
+            // Nobody in the database at all, which is what skipping setup leaves behind. The
+            // way back into setup belongs here, where the emptiness is.
+            ContentUnavailableView {
+                Label("Nobody here yet", systemImage: "person.2")
+            } description: {
+                Text("Setup imports your contacts and researches the people you pick. You can also add someone by hand.")
+            } actions: {
+                Button("Set up Ties…", action: startSetup)
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+            }
         } else {
             ContentUnavailableView("Select a person", systemImage: "person.crop.circle")
         }
+    }
+
+    /// Back into the wizard, from the beginning: there is nothing in the database for it to
+    /// resume alongside.
+    private func startSetup() {
+        model.resumeWizardStep = nil
+        model.hasCompletedSetup = false
     }
 
     private var selectedPerson: Person? {
