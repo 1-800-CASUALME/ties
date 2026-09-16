@@ -31,13 +31,15 @@ public final class Store: Sendable {
         return appSupport.appendingPathComponent("Ties", isDirectory: true).appendingPathComponent("ties.sqlite")
     }
 
-    /// Drops all rows from every table, but leaves the database file (and schema) in place.
+    /// Drops all rows from every table, then vacuums so the freed pages — and the data they
+    /// held — leave the file too. The schema stays in place.
     public func deleteEverything() throws {
         try writer.write { db in
             _ = try Job.deleteAll(db)
             try db.execute(sql: "DELETE FROM profile_fts")
             _ = try Person.deleteAll(db)
         }
+        try writer.vacuum()
     }
 
     public func databaseSizeBytes() -> Int64 {

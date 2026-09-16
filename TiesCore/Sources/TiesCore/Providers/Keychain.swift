@@ -40,6 +40,15 @@ public enum Keychain {
         SecItemDelete(baseQuery(account: account) as CFDictionary)
     }
 
+    /// Removes every entry Ties has stored, whatever the account. Used by "Delete Everything".
+    public static func deleteAll() {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+        ]
+        SecItemDelete(query as CFDictionary)
+    }
+
     private static func baseQuery(account: String) -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,

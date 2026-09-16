@@ -39,6 +39,12 @@ public final class DiskCache: Sendable {
         try? data.write(to: fileURL(for: key), options: .atomic)
     }
 
+    /// Deletes every cached body. Used by "Delete Everything"; the directory is recreated on
+    /// the next write.
+    public func clear() {
+        try? FileManager.default.removeItem(at: directory)
+    }
+
     private func fileURL(for key: String) -> URL {
         let digest = SHA256.hash(data: Data(key.utf8))
         let hex = digest.map { String(format: "%02x", $0) }.joined()
