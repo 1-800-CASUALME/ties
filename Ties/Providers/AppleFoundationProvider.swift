@@ -18,6 +18,32 @@ struct AppleFoundationProvider: AIProvider {
     /// off, or still downloading its assets.
     static var isAvailable: Bool { SystemLanguageModel.default.availability == .available }
 
+    /// Any schema, asked for in words. `FoundationModels` can only constrain generation
+    /// against a compile-time `@Generable` type, so a schema chosen at runtime is quoted in
+    /// the instructions and the object is dug back out of the model's text.
+    func complete(system: String, user: String, schemaJSON: String, schemaName: String) async throws -> Data {
+        let instructions = """
+            \(system)
+
+            Reply with one JSON object matching this schema and nothing else:
+            \(schemaJSON)
+            """
+        let session = LanguageModelSession(instructions: instructions)
+        do {
+            // Greedy sampling: these calls should be reproducible, not creative.
+            let response = try await session.respond(to: user, options: GenerationOptions(sampling: .greedy))
+            guard let data = JSONExtractor.firstObject(in: response.content) else {
+                throw ProviderError.badResponse("no JSON object in \(spec.name) output")
+            }
+            return data
+        } catch LanguageModelSession.GenerationError.exceededContextWindowSize {
+            // `AIProvider.extract` answers this by halving the chunk and retrying.
+            throw ProviderError.contextTooLarge
+        }
+    }
+
+    /// Extraction keeps the guided-generation path: `@Generable` constrains the model as it
+    /// decodes, which is stricter — and on-device, cheaper — than asking for JSON in words.
     func extractChunk(system: String, user: String) async throws -> ProfileFacts {
         let session = LanguageModelSession(instructions: system)
         do {

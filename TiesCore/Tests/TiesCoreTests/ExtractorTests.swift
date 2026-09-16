@@ -9,7 +9,9 @@ import Foundation
     let c = Candidate(personId: a.id, score: 9, status: .auto, primaryURL: "https://sara.dev")
     try store.replaceCandidates(personId: a.id, candidates: [c], evidence: [], pages: [SourcePage(candidateId: c.id, url: "https://sara.dev", title: "t", snippet: nil, bodyText: "Sara Ahmed leads growth at Acme.", kind: .page)])
     struct Fixed: AIProvider { let spec = ProviderCatalog.spec("custom")!
-        func extractChunk(system: String, user: String) async throws -> ProfileFacts { ProfileFacts(occupation: "Growth lead", canHelpWith: ["growth"]) }
+        func complete(system: String, user: String, schemaJSON: String, schemaName: String) async throws -> Data {
+            Data(#"{"occupation":"Growth lead","canHelpWith":["growth"]}"#.utf8)
+        }
         func validate() async throws {} }
     let ex = Extractor(store: store, provider: Fixed(), embedder: HashEmbedder())
     for await _ in await ex.run(personIds: [a.id, b.id]) {}
@@ -29,13 +31,13 @@ import Foundation
 
 // MARK: - Second concurrent run rejected (mirrors ScannerTests.secondRunWhileActiveIsRejected)
 
-/// An `AIProvider` whose `extractChunk` sleeps before returning, so a run stays active long
+/// An `AIProvider` whose model call sleeps before returning, so a run stays active long
 /// enough for a second `run(personIds:)` call to observe it as in progress.
 struct SlowProvider: AIProvider {
     let spec = ProviderCatalog.spec("custom")!
-    func extractChunk(system: String, user: String) async throws -> ProfileFacts {
+    func complete(system: String, user: String, schemaJSON: String, schemaName: String) async throws -> Data {
         try await Task.sleep(for: .milliseconds(200))
-        return ProfileFacts()
+        return Data("{}".utf8)
     }
     func validate() async throws {}
 }
