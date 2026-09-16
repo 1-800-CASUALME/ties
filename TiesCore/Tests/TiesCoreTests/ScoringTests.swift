@@ -3,9 +3,10 @@ import Foundation
 @testable import TiesCore
 
 private func finding(_ url: String, name: String? = nil, company: String? = nil, username: String? = nil, avatar: String? = nil,
-                     kind: SourcePage.Kind = .serp, evidence: [EvidenceItem] = [], linked: [String] = [], body: String? = nil) -> ProbeFinding {
-    ProbeFinding(url: url, displayName: name, headline: nil, company: company, location: nil, avatarURL: avatar, username: username,
-                 pageTitle: nil, snippet: nil, bodyText: body, pageKind: kind, evidence: evidence, linkedURLs: linked)
+                     kind: SourcePage.Kind = .serp, evidence: [EvidenceItem] = [], linked: [String] = [], body: String? = nil,
+                     headline: String? = nil, location: String? = nil, snippet: String? = nil) -> ProbeFinding {
+    ProbeFinding(url: url, displayName: name, headline: headline, company: company, location: location, avatarURL: avatar, username: username,
+                 pageTitle: nil, snippet: snippet, bodyText: body, pageKind: kind, evidence: evidence, linkedURLs: linked)
 }
 
 @Test func groupsMergeOnUsernameAndLinkedURLs() {
@@ -161,4 +162,113 @@ private func finding(_ url: String, name: String? = nil, company: String? = nil,
     #expect(s.count == 1)
     #expect(s.first?.candidate.status == .pending)
     #expect(s.first?.candidate.score == ScoringWeights.default.name)
+}
+
+// MARK: - Task 7: local signals as verification evidence
+
+@Test func selfLinkAutoAccepts() {
+    // The link is the one the person signed their mail with; the candidate URL is the same
+    // page reached with tracking parameters and a "www." in front.
+    let i = input(name: ("Sara", "Ahmed"), signals: localSignals(links: ["https://sara.dev/about"]))
+    let s = CandidateScorer.score(groups: [[finding("https://www.sara.dev/about?utm_source=x", kind: .page)]], input: i)
+    #expect(s.count == 1)
+    #expect(s[0].candidate.status == .auto)
+    #expect(s[0].candidate.score == ScoringWeights.default.selfLink)
+    #expect(s[0].evidence.contains { $0.kind == .selfLink })
+}
+
+@Test func signatureTitleRaises() {
+    let i = input(name: ("Sara", "Ahmed"), signals: localSignals(titles: ["Senior Product Manager"]))
+    let hit = finding("https://www.linkedin.com/in/sara-ahmed", name: "Sara Ahmed", headline: "Senior Product Manager at Acme")
+    let s = CandidateScorer.score(groups: [[hit]], input: i)
+    #expect(s.count == 1)
+    #expect(s[0].evidence.contains { $0.kind == .signatureTitle })
+    #expect(s[0].candidate.score == ScoringWeights.default.signatureTitle)
+}
+
+@Test func honorificMatchesProfession() {
+    // Everyone writes to her as "Dr Sara"; the page says she is a cardiologist, MD.
+    let i = input(name: ("Sara", "Ahmed"), signals: localSignals(honorifics: ["Dr"]))
+    let hit = finding("https://www.linkedin.com/in/sara-ahmed", name: "Sara Ahmed", headline: "Cardiologist, MD at Mayo Clinic")
+    let s = CandidateScorer.score(groups: [[hit]], input: i)
+    #expect(s.count == 1)
+    #expect(s[0].evidence.contains { $0.kind == .honorific })
+    #expect(s[0].candidate.score == ScoringWeights.default.honorific)
+}
+
+@Test func selfNameMatchesAlias() {
+    // Contacts says "Sara Ahmed"; every chat and mail calls her "Suzy Ahmed". The alias both
+    // gets the candidate past the name gate and vouches for it.
+    let i = input(name: ("Sara", "Ahmed"), signals: localSignals(aliases: ["Suzy Ahmed"]))
+    let s = CandidateScorer.score(groups: [[finding("https://x.com/suzyahmed", name: "Suzy Ahmed")]], input: i)
+    #expect(s.count == 1)
+    #expect(s[0].evidence.contains { $0.kind == .selfName })
+    #expect(s[0].candidate.score == ScoringWeights.default.selfName)
+}
+
+@Test func pushNameConflict() {
+    // The number's WhatsApp push name is somebody else's full name — a shared handle, so the
+    // candidate is doubted even though its name matches the one in Contacts.
+    let i = input(name: ("Sara", "Ahmed"), signals: localSignals(aliases: ["Bob Ray"]))
+    let e = [EvidenceItem(kind: .emailHash, weight: 8, detail: "x", sourceURL: nil)]
+    let s = CandidateScorer.score(groups: [[finding("https://x.com/sara", name: "Sara Ahmed", evidence: e)]], input: i)
+    #expect(s.count == 1)
+    #expect(s[0].evidence.filter { $0.kind == .conflict }.count == 1)
+    #expect(s[0].candidate.score == 8 + ScoringWeights.default.conflict)
+}
+
+@Test func signatureTitleConflict() {
+    let i = input(name: ("Sara", "Ahmed"), signals: localSignals(titles: ["Cardiologist, MD"]))
+    let e = [EvidenceItem(kind: .emailHash, weight: 8, detail: "x", sourceURL: nil)]
+    let hit = finding("https://x.com/sara", name: "Sara Ahmed", evidence: e, headline: "Software Engineer at Acme")
+    let s = CandidateScorer.score(groups: [[hit]], input: i)
+    #expect(s.count == 1)
+    #expect(!s[0].evidence.contains { $0.kind == .signatureTitle })
+    #expect(s[0].evidence.filter { $0.kind == .conflict }.count == 1)
+    #expect(s[0].candidate.score == 8 + ScoringWeights.default.conflict)
+}
+
+@Test func sameProfessionInOtherWordsIsNoConflict() {
+    // "Physician" and "Doctor" are one profession, not two, so a signature title that says one
+    // and a headline that says the other must not read as a contradiction.
+    let i = input(name: ("Sara", "Ahmed"), signals: localSignals(titles: ["Physician"]))
+    let e = [EvidenceItem(kind: .emailHash, weight: 8, detail: "x", sourceURL: nil)]
+    let hit = finding("https://x.com/sara", name: "Sara Ahmed", evidence: e, headline: "Doctor at Mayo Clinic")
+    let s = CandidateScorer.score(groups: [[hit]], input: i)
+    #expect(s.count == 1)
+    #expect(!s[0].evidence.contains { $0.kind == .conflict })
+}
+
+@Test func signalLocationScores() {
+    let i = input(name: ("Sara", "Ahmed"), signals: localSignals(location: "Riyadh"))
+    let s = CandidateScorer.score(groups: [[finding("https://x.com/sara", name: "Sara Ahmed", location: "Riyadh, Saudi Arabia")]], input: i)
+    #expect(s.count == 1)
+    #expect(s[0].evidence.contains { $0.kind == .location })
+    #expect(s[0].candidate.score == ScoringWeights.default.location)
+}
+
+@Test func signalCompanyMatchesLikeAContactsCompany() {
+    // No organization in Contacts — the company came out of a mail signature.
+    let i = input(name: ("Sara", "Ahmed"), signals: localSignals(companies: ["Acme Corp"]))
+    let s = CandidateScorer.score(groups: [[finding("https://x.com/sara", name: "Sara Ahmed", company: "ACME CORP")]], input: i)
+    #expect(s.count == 1)
+    #expect(s[0].evidence.contains { $0.kind == .company })
+    #expect(!s[0].evidence.contains { $0.kind == .conflict })
+}
+
+@Test func newEvidenceKindsSurviveTheDedupPass() {
+    // Every kind a probe can hand in has to be representable in the evidence list; a kind
+    // missing from the scorer's fixed order would be dropped silently.
+    let i = input(name: ("Sara", "Ahmed"))
+    let e: [EvidenceItem] = [
+        EvidenceItem(kind: .selfLink, weight: 99, detail: "a", sourceURL: nil),
+        EvidenceItem(kind: .selfName, weight: 99, detail: "b", sourceURL: nil),
+        EvidenceItem(kind: .signatureTitle, weight: 99, detail: "c", sourceURL: nil),
+        EvidenceItem(kind: .honorific, weight: 99, detail: "d", sourceURL: nil),
+    ]
+    let s = CandidateScorer.score(groups: [[finding("https://x.com/sara", name: "Sara Ahmed", evidence: e)]], input: i)
+    #expect(s.count == 1)
+    #expect(Set(s[0].evidence.map(\.kind)) == Set([.selfLink, .selfName, .signatureTitle, .honorific]))
+    let w = ScoringWeights.default
+    #expect(s[0].candidate.score == w.selfLink + w.selfName + w.signatureTitle + w.honorific)
 }

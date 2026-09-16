@@ -100,3 +100,45 @@ struct FakeBackend: SearchBackend {
     #expect(matched?.evidence.contains { $0.kind == .company && $0.weight == 3 } == true)
     #expect(!f.contains { $0.url == "https://github.com/other" })
 }
+
+// MARK: - Task 7: local signals as search seeds
+
+@Test func quickSeedsOneAliasQuery() {
+    let i = input(name: ("Sara", "Ahmed"), company: "Acme",
+                  signals: localSignals(aliases: ["Sara Al-Otaibi"], honorifics: ["Dr"], titles: ["Cardiologist"]))
+    let q = SearchQueryBuilder.queries(for: i, mode: .quick)
+    #expect(q == ["\"Sara Ahmed\" \"Acme\"", "\"Sara Al-Otaibi\" \"Acme\""])
+}
+
+@Test func thoroughSeedsAll() {
+    let i = input(name: ("Sara", "Ahmed"), company: "Acme",
+                  signals: localSignals(aliases: ["Sara Ahmed", "Sara Al-Otaibi"], honorifics: ["Dr"]))
+    let q = SearchQueryBuilder.queries(for: i, mode: .thorough)
+    #expect(q == [
+        "\"Sara Ahmed\" \"Acme\"",
+        "\"Sara Ahmed\" site:linkedin.com/in",
+        "\"Sara Ahmed\" site:github.com",
+        "\"Sara Ahmed\" (site:x.com OR site:twitter.com)",
+        "\"Sara Al-Otaibi\" \"Acme\"",
+        "\"Dr Sara Ahmed\"",
+    ])
+}
+
+@Test func aliasSeedFallsBackToLinkedInWithoutACompany() {
+    let i = input(name: ("Sara", "Ahmed"), signals: localSignals(aliases: ["Sara Al-Otaibi"]))
+    let q = SearchQueryBuilder.queries(for: i, mode: .quick)
+    #expect(q == ["\"Sara Ahmed\" site:linkedin.com/in", "\"Sara Ahmed\"", "\"Sara Al-Otaibi\" site:linkedin.com/in"])
+}
+
+@Test func ambiguousSingleTokenNameSeedsATitleQuery() {
+    // One-token name: the builder has nothing to search on by itself, and the signature title
+    // with the company is the only query worth running.
+    let i = input(name: ("Cher", ""), company: "Acme", signals: localSignals(titles: ["Senior Product Manager"]))
+    #expect(SearchQueryBuilder.queries(for: i) == ["\"Senior Product Manager\" \"Acme\""])
+}
+
+@Test func signalCompanySeedsTheCompanyQuery() {
+    // The company came from a mail signature rather than Contacts, and still scopes the search.
+    let i = input(name: ("Sara", "Ahmed"), signals: localSignals(companies: ["Acme"]))
+    #expect(SearchQueryBuilder.queries(for: i, mode: .quick) == ["\"Sara Ahmed\" \"Acme\""])
+}

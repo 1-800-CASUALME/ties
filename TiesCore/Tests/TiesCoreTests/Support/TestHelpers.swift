@@ -58,10 +58,22 @@ final class FakeHTTP: HTTPClient, @unchecked Sendable {
     }
 }
 
-/// Builds a `ProbeInput` for a person with the given name, emails, urls, and company.
-func input(name: (String, String), emails: [String] = [], urls: [String] = [], company: String? = nil) -> ProbeInput {
+/// Builds a `ProbeInput` for a person with the given name, emails, urls, company, and local
+/// signals. The signals' `personId` is rewritten to the person built here, so callers don't
+/// need an id in hand before calling — see `localSignals(...)`.
+func input(name: (String, String), emails: [String] = [], urls: [String] = [], company: String? = nil,
+           signals: LocalSignals? = nil) -> ProbeInput {
     let p = Person(givenName: name.0, familyName: name.1, organization: company)
     var ch = emails.map { Channel(personId: p.id, kind: .email, label: nil, value: $0, normalized: $0) }
     ch += urls.map { Channel(personId: p.id, kind: .url, label: nil, value: $0, normalized: $0) }
-    return ProbeInput(person: p, channels: ch)
+    var signals = signals
+    signals?.personId = p.id
+    return ProbeInput(person: p, channels: ch, signals: signals)
+}
+
+/// Builds a `LocalSignals` with a placeholder `personId` for `input(name:signals:)` to fill in.
+func localSignals(aliases: [String] = [], honorifics: [String] = [], titles: [String] = [],
+                  companies: [String] = [], links: [String] = [], location: String? = nil) -> LocalSignals {
+    LocalSignals(personId: "", aliases: aliases, honorifics: honorifics, titles: titles,
+                 companies: companies, links: links, location: location)
 }

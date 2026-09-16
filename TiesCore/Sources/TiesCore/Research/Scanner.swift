@@ -16,6 +16,9 @@ public actor Scanner {
     private let probes: [any Probe]
     private let client: any HTTPClient
     private let weights: ScoringWeights
+    /// How deeply each person is researched. Quick skips web search entirely for anyone whose
+    /// own links already say who they are.
+    private let mode: ScanMode
     private let concurrency: Int
     /// How long to back off after a `SearchBackendError.challenge` before retrying the probe
     /// once. An `init` parameter (rather than a hardcoded 300s) so tests can shorten it.
@@ -41,6 +44,7 @@ public actor Scanner {
         probes: [any Probe],
         client: any HTTPClient,
         weights: ScoringWeights = .default,
+        mode: ScanMode = .thorough,
         concurrency: Int = 4,
         challengeBackoff: Duration = .seconds(60)
     ) {
@@ -48,6 +52,7 @@ public actor Scanner {
         self.probes = probes
         self.client = client
         self.weights = weights
+        self.mode = mode
         self.concurrency = concurrency
         self.challengeBackoff = challengeBackoff
     }
@@ -155,6 +160,25 @@ public actor Scanner {
         finishStream()
     }
 
+    /// Hosts where a link says nothing about who owns it: shorteners, and the stores of files
+    /// and videos anyone can post to.
+    private static let sharedHosts = [
+        "bit.ly", "t.co", "lnkd.in", "goo.gl", "tinyurl.com", "wa.me", "t.me",
+        "youtube.com", "youtu.be", "docs.google.com", "drive.google.com",
+    ]
+
+    /// True when a link the person shared themselves is worth fetching as their identity: a
+    /// profile on linkedin.com, github.com or x.com, or their own domain. `SignalRules` only
+    /// keeps identity-shaped URLs in the first place, so everything that isn't behind a
+    /// shortener or on a file/video host is one of those two.
+    static func isCandidateWorthy(_ url: String) -> Bool {
+        guard let components = URLComponents(string: url),
+              let scheme = components.scheme?.lowercased(),
+              scheme == "https" || scheme == "http",
+              let host = components.host?.lowercased() else { return false }
+        return !sharedHosts.contains { host == $0 || host.hasSuffix("." + $0) }
+    }
+
     private func waitWhilePaused() async {
         while paused && !cancelled {
             try? await Task.sleep(for: .milliseconds(200))
@@ -201,13 +225,33 @@ public actor Scanner {
             }
 
             let channels = try store.channels(personId: personId)
-            let probeInput = ProbeInput(person: person, channels: channels)
+            let signals = try? store.signals(personId: personId)
+            let probeInput = ProbeInput(person: person, channels: channels, signals: signals)
 
             var findings: [ProbeFinding] = []
             var errors: [String] = []
             var finishedStages: [String] = []
 
+            // A link the person shared or signed with themselves settles who they are, so it is
+            // fetched directly rather than hoped for in a search result. In quick mode that
+            // makes the web search redundant — the expensive probe skipped for the one case
+            // where its answer is already known.
+            let selfLinks = (signals?.links ?? []).filter(Scanner.isCandidateWorthy)
+            let skipSearch = mode == .quick && !selfLinks.isEmpty
+            if !selfLinks.isEmpty {
+                let pageProbe = probes.compactMap { $0 as? PageFetchProbe }.first ?? PageFetchProbe()
+                continuation?.yield(ScanProgress(
+                    completed: completed, total: total, currentName: displayName, finished: false,
+                    stage: pageProbe.displayName, finishedStages: finishedStages,
+                    notice: skippedProbes.isEmpty ? nil : Scanner.searchSkippedNotice
+                ))
+                findings += await pageProbe.fetchDirect(urls: selfLinks, input: probeInput, client: client)
+            }
+
             for probe in probes {
+                if skipSearch, probe.id == "search" {
+                    continue
+                }
                 if skippedProbes.contains(probe.id) {
                     errors.append("\(probe.id): skipped after repeated challenges")
                     continue
