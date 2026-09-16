@@ -160,6 +160,36 @@ import Testing
     #expect(MailCollector(index: DirectoryMailIndex(root: missing), root: missing).status() == .unavailable)
 }
 
+/// A `MailIndex` that never finds anything — Spotlight with no index for the mailbox.
+private struct EmptyMailIndex: MailIndex {
+    func messageURLs(involving address: String, limit: Int) async throws -> [URL] { [] }
+}
+
+@Test func anUnindexedMailboxTooLargeToWalkSaysSo() async throws {
+    let root = try EMLXFixture.mailbox()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let probe = input(name: ("Sara", "Ahmed"), emails: [EMLXFixture.person])
+
+    // Three files in the mailbox, a ceiling of two: the directory walk is not affordable, so an
+    // empty run means "we could not look", not "no mail with her".
+    let tooLarge = MailCollector(index: EmptyMailIndex(), root: root, fallbackCeiling: 2)
+    #expect(tooLarge.status() == .ready)
+    let nothing = try await tooLarge.collect(for: probe, since: nil)
+    #expect(nothing.isEmpty)
+    #expect(tooLarge.status() == .error(MailCollector.indexMissingMessage))
+
+    // Under the ceiling the walk would have answered, so an empty result is the plain truth and
+    // the mailbox stays ready.
+    let small = MailCollector(index: EmptyMailIndex(), root: root, fallbackCeiling: 5_000)
+    _ = try await small.collect(for: probe, since: nil)
+    #expect(small.status() == .ready)
+
+    // A later run that does find mail clears the complaint.
+    let working = MailCollector(index: DirectoryMailIndex(root: root), root: root, fallbackCeiling: 2)
+    _ = try await working.collect(for: probe, since: nil)
+    #expect(working.status() == .ready)
+}
+
 @Test func spotlightFallsBackToTheDirectoryWhenItFindsNothing() async throws {
     let root = try EMLXFixture.mailbox()
     defer { try? FileManager.default.removeItem(at: root) }

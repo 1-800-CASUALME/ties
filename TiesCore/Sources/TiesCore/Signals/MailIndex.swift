@@ -11,7 +11,9 @@ public struct SpotlightMailIndex: MailIndex {
     /// How long Spotlight gets to answer before the directory walk takes over.
     static let defaultTimeout: TimeInterval = 5
     /// Walking more `.emlx` files than this by hand costs more than the answer is worth.
-    static let directoryFallbackLimit = 5_000
+    /// `MailCollector` applies the same ceiling when deciding whether an empty run means "no
+    /// mail with this person" or "we could not look".
+    public static let directoryFallbackLimit = 5_000
 
     public let root: URL
     let timeout: TimeInterval

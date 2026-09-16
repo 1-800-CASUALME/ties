@@ -3,9 +3,8 @@ import GRDB
 import Testing
 @testable import TiesCore
 
-/// Serialized: the cap test reads `MessagesCollector.lastVisited`, which every other collection
-/// in this suite overwrites.
-@Suite(.serialized)
+/// Nothing here is shared between tests — the visit counter is per collector — so the suite
+/// runs in parallel with the rest.
 struct MessagesCollectorTests {
     @Test func collectsHonorificLinkAndCounts() async throws {
         let db = try ChatDBFixture.make(at: tmp())
@@ -14,9 +13,13 @@ struct MessagesCollectorTests {
 
         #expect(s.honorifics == ["dr"])
         #expect(s.links == ["https://linkedin.com/in/sara-ahmed"])
-        #expect(s.interactions == 4)
+        // Her own group message plus both lines of the one-to-one chat — not the three messages
+        // the group's other participant wrote about her.
+        #expect(s.interactions == ChatDBFixture.expectedInteractions)
         #expect(s.sources == ["messages"])
-        #expect(s.lastContact != nil)
+        let last = try #require(s.lastContact)
+        let expected = Date.now.addingTimeInterval(-ChatDBFixture.lastContactDaysAgo * 86_400)
+        #expect(abs(last.timeIntervalSince(expected)) < 60)
         // The group chat's name is company-ish, and the person's own name never becomes an alias.
         #expect(s.companies == [ChatDBFixture.groupName])
         #expect(s.aliases.isEmpty)
@@ -29,7 +32,7 @@ struct MessagesCollectorTests {
         let s = try await c.collect(for: input(name: ("Sara", "Ahmed"), phones: [ChatDBFixture.personHandle]), since: nil)
 
         #expect(ChatDBFixture.fillerCount + ChatDBFixture.recentCount > MessagesCollector.messageCap)
-        #expect(MessagesCollector.lastVisited == MessagesCollector.messageCap)
+        #expect(c.lastVisited == MessagesCollector.messageCap)
         // The cap keeps the newest messages, so the recent ones still produce their signals.
         #expect(s.honorifics == ["dr"])
     }
@@ -42,10 +45,50 @@ struct MessagesCollectorTests {
             since: Date.now.addingTimeInterval(-43.5 * 86_400)
         )
 
-        // Only the person's own last message is newer than the cutoff.
-        #expect(s.interactions == 1)
+        // Only her own last group message and the one-to-one chat are newer than the cutoff.
+        #expect(s.interactions == 3)
         #expect(s.honorifics.isEmpty)
         #expect(s.links == ["https://linkedin.com/in/sara-ahmed"])
+    }
+
+    @Test func groupTrafficIsNotContactWithThePerson() async throws {
+        let db = try ChatDBFixture.make(at: tmp())
+        let c = MessagesCollector(chatDB: db, userNames: [])
+        // The other participant's handle sees the same group, but only their own messages and
+        // no one-to-one chat: the three lines they wrote, and nothing of hers.
+        let s = try await c.collect(for: input(name: ("Omar", "K"), phones: [ChatDBFixture.otherHandle]), since: nil)
+
+        #expect(s.interactions == 3)
+        // The group is still theirs, so its company-ish name still counts.
+        #expect(s.companies == [ChatDBFixture.groupName])
+    }
+
+    @Test func aSessionCopiesTheStoreOnce() async throws {
+        let db = try ChatDBFixture.make(at: tmp())
+        let probe = input(name: ("Sara", "Ahmed"), phones: [ChatDBFixture.personHandle])
+
+        let session = MessagesCollector(chatDB: db, userNames: [])
+        try await session.beginSession()
+        let first = try await session.collect(for: probe, since: nil)
+        let second = try await session.collect(for: probe, since: nil)
+        #expect(session.snapshotsOpened == 1)
+        // The reused copy answers exactly as the first read did (`collectedAt` is the only field
+        // that moves between two runs).
+        #expect(first.honorifics == second.honorifics)
+        #expect(first.links == second.links)
+        #expect(first.interactions == second.interactions)
+        await session.endSession()
+
+        // Used without a session, every collection copies the store for itself.
+        let loose = MessagesCollector(chatDB: db, userNames: [])
+        _ = try await loose.collect(for: probe, since: nil)
+        _ = try await loose.collect(for: probe, since: nil)
+        #expect(loose.snapshotsOpened == 2)
+    }
+
+    @Test func beginningASessionOnAMissingStoreThrows() async {
+        let missing = MessagesCollector(chatDB: URL(fileURLWithPath: "/nonexistent/chat.db"), userNames: [])
+        await #expect(throws: SourceError.self) { try await missing.beginSession() }
     }
 
     @Test func returnsEmptySignalsWithoutHandles() async throws {
@@ -109,6 +152,10 @@ struct MessagesCollectorTests {
         #expect(TypedStream.text(from: TypedStreamFixture.longText) == String(repeating: "ب", count: 200))
         #expect(TypedStream.text(from: TypedStreamFixture.withoutMarker) == nil)
         #expect(TypedStream.text(from: Data()) == nil)
+        // An archive cut short reads as "no text", never off the end of the buffer.
+        #expect(TypedStream.text(from: TypedStreamFixture.truncatedAfterMarker) == nil)
+        #expect(TypedStream.text(from: TypedStreamFixture.truncatedBeforeLength) == nil)
+        #expect(TypedStream.text(from: TypedStreamFixture.truncatedPayload) == nil)
         #expect(TypedStream.text(from: TypedStreamFixture.archive("مرحبا Sara")) == "مرحبا Sara")
     }
 

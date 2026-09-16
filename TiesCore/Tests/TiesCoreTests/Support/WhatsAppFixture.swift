@@ -58,8 +58,14 @@ enum WhatsAppFixture {
     /// two group messages. Other members' group chatter is not an interaction with her.
     static let expectedInteractions = 5
 
+    /// The group's name in WhatsApp — company-ish, so it lands in `companies`.
+    static let groupName = "Clinic Team"
+
     /// Writes the fixture to a fresh temporary directory and returns the store's URL.
-    static func make(now: Date = .now, pushName: String = saraPushName) throws -> URL {
+    ///
+    /// `groupMembers: false` leaves `ZWAGROUPMEMBER` empty, the shape of a store WhatsApp has
+    /// pruned: the group must still be found, via the messages the person wrote in it.
+    static func make(now: Date = .now, pushName: String = saraPushName, groupMembers: Bool = true) throws -> URL {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("ties-whatsapp-fixture-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -100,7 +106,7 @@ enum WhatsAppFixture {
 
             for (pk, jid, name, type, last) in [
                 (1, saraJID, "Sara Ahmed", 0, lastContactDaysAgo),
-                (2, groupJID, "Clinic Team", 1, 12.0),
+                (2, groupJID, groupName, 1, 12.0),
                 (3, omarJID, "Omar", 0, 5.0),
             ] as [(Int, String, String, Int, Double)] {
                 try db.execute(
@@ -109,11 +115,13 @@ enum WhatsAppFixture {
                 )
             }
 
-            for (index, jid) in [saraJID, omarJID, hudaJID].enumerated() {
-                try db.execute(
-                    sql: "INSERT INTO ZWAGROUPMEMBER VALUES (?, ?, ?)",
-                    arguments: [index + 1, 2, jid]
-                )
+            if groupMembers {
+                for (index, jid) in [saraJID, omarJID, hudaJID].enumerated() {
+                    try db.execute(
+                        sql: "INSERT INTO ZWAGROUPMEMBER VALUES (?, ?, ?)",
+                        arguments: [index + 1, 2, jid]
+                    )
+                }
             }
 
             try db.execute(
