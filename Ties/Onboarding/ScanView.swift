@@ -26,6 +26,17 @@ struct ScanView: View {
     /// Display name back to person id: a progress event carries only a name, and this is how it
     /// becomes the one row worth re-reading.
     @State private var idsByName: [String: String] = [:]
+    /// The probe running right now for each person still in flight, by person id. Four people
+    /// are scanned at once, so this is a map rather than one current stage: each row says what
+    /// its own person is being searched on.
+    @State private var stages: [String: String] = [:]
+    /// Set by the first progress event of the run, which is what tells the hint below that the
+    /// scan is demonstrably alive.
+    @State private var started = false
+    /// Shown only when three seconds pass with nothing back from the scanner: the first probe of
+    /// the first person can take that long, and a screen with nothing on it but a still bar is
+    /// the moment the user starts to wonder whether anything is running.
+    @State private var showsHint = false
     @State private var paused = false
     @State private var errorMessage: String?
 
@@ -48,6 +59,18 @@ struct ScanView: View {
                     .padding(.bottom, 8)
             }
 
+            if showsHint {
+                Label(
+                    "Researching starts with Gravatar, then GitHub, username sites, the web, and their pages.",
+                    systemImage: "info.circle"
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .padding(.bottom, 8)
+                .transition(.opacity)
+            }
+
             ContactListView(people: people, query: .constant("")) { person in
                 trailing(person)
             }
@@ -64,6 +87,15 @@ struct ScanView: View {
         }
         .padding(.top, 24)
         .task { await scan() }
+        .task { await waitForFirstEvent() }
+    }
+
+    /// Puts the hint up if the scanner hasn't said anything within three seconds, and leaves it
+    /// alone once it has.
+    private func waitForFirstEvent() async {
+        try? await Task.sleep(for: .seconds(3))
+        guard !Task.isCancelled, !started else { return }
+        withAnimation(.snappy) { showsHint = true }
     }
 
     @ViewBuilder
@@ -71,6 +103,14 @@ struct ScanView: View {
         if done.contains(person.id) {
             let candidate = best[person.id]
             ConfidencePill(score: candidate?.score ?? 0, status: candidate?.status ?? .pending)
+        } else if let stage = stages[person.id] {
+            // What this person is being searched on right now, in the probe's own words, so a
+            // row that sits there for a minute still says what it is doing.
+            Text(stage)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .transition(.opacity)
+                .accessibilityLabel("Searching \(stage)")
         } else {
             RoundedRectangle(cornerRadius: 6)
                 .fill(.quaternary)
@@ -172,8 +212,13 @@ struct ScanView: View {
     /// this event is about. The full map is a statement per person, far too much to run on the
     /// main actor several times a second, so it waits for the end of the run.
     private func refresh(_ progress: ScanProgress) {
+        if !started {
+            started = true
+            withAnimation(.snappy) { showsHint = false }
+        }
         do {
             try refreshJobs()
+            noteStage(progress)
             if progress.finished {
                 best = try model.store.bestCandidatesByPerson()
             } else if let id = progress.currentName.flatMap({ idsByName[$0] }) {
@@ -183,6 +228,17 @@ struct ScanView: View {
             errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    /// Keeps the per-row stage current: the person this event names is on the probe it names,
+    /// and anyone whose job has ended has no stage left to show.
+    private func noteStage(_ progress: ScanProgress) {
+        withAnimation(.snappy) {
+            if let name = progress.currentName, let id = idsByName[name] {
+                stages[id] = progress.stage
+            }
+            stages = stages.filter { !done.contains($0.key) }
         }
     }
 

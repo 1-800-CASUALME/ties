@@ -56,6 +56,10 @@ struct ProgressCaptionView: View {
             }
             .imageScale(.large)
 
+            if let notice = progress.notice {
+                noticeBanner(notice)
+            }
+
             Label(headline, systemImage: headlineIcon)
                 .font(.callout)
                 .lineLimit(1)
@@ -71,6 +75,25 @@ struct ProgressCaptionView: View {
     }
 
     // MARK: - What is happening
+
+    /// A run-level warning from the scanner — so far, that web search has been switched off
+    /// after the engine challenged twice. Sits right under the bar, where the research-engine
+    /// menu beside it is the obvious thing to do about it.
+    private func noticeBanner(_ notice: String) -> some View {
+        Label {
+            Text(notice)
+        } icon: {
+            Image(systemName: "exclamationmark.triangle")
+                .foregroundStyle(.yellow)
+        }
+        .font(.caption)
+        .lineLimit(2)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.yellow.opacity(0.12), in: RoundedRectangle(cornerRadius: 6))
+        .transition(.opacity)
+    }
 
     /// What the run is doing, in the order that matters to someone watching: a backoff it is
     /// waiting out first, then the probe running right now, then whoever is being worked on.
