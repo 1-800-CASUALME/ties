@@ -6,6 +6,20 @@ import TiesCore
 /// `next()`/`back()`.
 enum WizardStep: Int, CaseIterable {
     case welcome, access, select, scan, review, provider, extract, done
+
+    /// One word per step, for the tooltip on its dot.
+    var title: String {
+        switch self {
+        case .welcome: "Welcome"
+        case .access: "Contacts"
+        case .select: "Select"
+        case .scan: "Research"
+        case .review: "Review"
+        case .provider: "AI"
+        case .extract: "Extract"
+        case .done: "Done"
+        }
+    }
 }
 
 /// Everything the setup wizard collects as the user moves through it: contacts imported,
@@ -55,6 +69,29 @@ final class WizardState {
     func back() {
         guard let step = WizardStep(rawValue: step.rawValue - 1) else { return }
         direction = .leading
+        withAnimation(.snappy) { self.step = step }
+    }
+
+    /// Goes straight to `step`, which is what clicking one of the dots means. The push runs the
+    /// way the user is travelling, so jumping back still reads as going back.
+    ///
+    /// Leaving a run behind stops it first. The screen watching it goes away with the jump, and
+    /// a scanner nobody is reading from would keep working through people and writing candidates
+    /// for a screen that is gone — and, worse, would still be there on a later visit, leaving
+    /// that screen watching a stream it has no loop for.
+    func jump(to step: WizardStep) {
+        guard step != self.step else { return }
+        if self.step == .scan || self.step == .extract {
+            let scanner = scanner
+            let extractor = extractor
+            self.scanner = nil
+            self.extractor = nil
+            Task {
+                await scanner?.cancel()
+                await extractor?.cancel()
+            }
+        }
+        direction = step.rawValue > self.step.rawValue ? .trailing : .leading
         withAnimation(.snappy) { self.step = step }
     }
 }

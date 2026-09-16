@@ -46,13 +46,24 @@ struct ReviewView: View {
                     .padding(.bottom, 8)
             }
 
-            ContactListView(
-                people: people,
-                query: .constant(""),
-                selection: $state.selectedForExtract,
-                subtitle: { best[$0.id]?.headline ?? $0.organization }
-            ) { person in
-                trailing(person)
+            if people.isEmpty {
+                // Nobody has been researched — which arriving here by clicking the dot can
+                // mean. Nothing to correct, and Continue still moves on.
+                ContentUnavailableView {
+                    Label("Nothing researched yet", systemImage: "magnifyingglass")
+                } description: {
+                    Text("Go back to Research to look people up, or carry on without it.")
+                }
+                .frame(maxHeight: .infinity)
+            } else {
+                ContactListView(
+                    people: people,
+                    query: .constant(""),
+                    selection: $state.selectedForExtract,
+                    subtitle: { best[$0.id]?.headline ?? $0.organization }
+                ) { person in
+                    trailing(person)
+                }
             }
 
             // A re-run in flight is about to rewrite one of these rows; moving on mid-write

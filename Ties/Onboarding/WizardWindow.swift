@@ -61,7 +61,12 @@ struct WizardWindow: View {
 
     private var bottomBar: some View {
         ZStack {
-            StepDots(count: WizardStep.allCases.count, current: state.step.rawValue)
+            StepDots(
+                count: WizardStep.allCases.count,
+                current: state.step.rawValue,
+                names: WizardStep.allCases.map(\.title),
+                onSelect: jump
+            )
             HStack(spacing: 4) {
                 if canCancel {
                     Button(action: cancel) {
@@ -88,6 +93,12 @@ struct WizardWindow: View {
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 16)
+    }
+
+    /// Where a dot goes when it is clicked.
+    private func jump(to index: Int) {
+        guard let step = WizardStep(rawValue: index) else { return }
+        state.jump(to: step)
     }
 
     /// Leaves setup for the app, on any step. Whatever the wizard has already written stays —

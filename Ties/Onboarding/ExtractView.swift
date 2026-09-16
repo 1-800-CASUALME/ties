@@ -34,51 +34,78 @@ struct ExtractView: View {
     /// useful move is back to the AI picker.
     @State private var providerFailed = false
 
+    /// Nobody was picked on the Review screen — which a jump straight to this dot can also
+    /// mean. There is no run to watch and nothing to report, so the screen says so and waits.
+    private var nothingToExtract: Bool {
+        state.selectedForExtract.isEmpty
+    }
+
     var body: some View {
         VStack(spacing: 0) {
-            ProgressCaptionView(
-                progress: state.extractProgress,
-                startedAt: state.extractStartedAt,
-                work: .extract,
-                onCancel: stop,
-                paused: false,
-                showsPause: false
-            )
-            .padding(.horizontal, 20)
-            .padding(.bottom, 12)
-
-            if let errorMessage {
-                VStack(spacing: 8) {
-                    Label(errorMessage, systemImage: "exclamationmark.triangle")
-                        .foregroundStyle(.red)
-                    if providerFailed {
-                        Button("Choose a different AI") { state.back() }
-                            .controlSize(.large)
-                    }
-                }
-                .padding(.bottom, 8)
+            if nothingToExtract {
+                nothingToExtractView
+            } else {
+                run
             }
-
-            ContactListView(
-                people: people,
-                query: .constant(""),
-                subtitle: { profiles[$0.id]?.facts.occupation }
-            ) { person in
-                trailing(person)
-            }
-
-            // In the layout from the start so the list doesn't jump when the first profile
-            // lands; until then there is nothing partial to continue with.
-            Button("Continue with partial results", action: stop)
-                .controlSize(.large)
-                .padding(.vertical, 16)
-                .opacity(done.isEmpty ? 0 : 1)
-                .disabled(done.isEmpty)
-                .accessibilityHidden(done.isEmpty)
-                .animation(.snappy, value: done.isEmpty)
         }
         .padding(.top, 24)
         .task { await extract() }
+    }
+
+    private var nothingToExtractView: some View {
+        VStack(spacing: 16) {
+            ContentUnavailableView {
+                Label("Nothing to extract", systemImage: "tray")
+            } description: {
+                Text("Nobody is picked, so the AI has nothing to read. Pick people on the Review step, or carry on.")
+            }
+            PrimaryButton("Continue") { state.next() }
+                .padding(.bottom, 16)
+        }
+    }
+
+    @ViewBuilder
+    private var run: some View {
+        ProgressCaptionView(
+            progress: state.extractProgress,
+            startedAt: state.extractStartedAt,
+            work: .extract,
+            onCancel: stop,
+            paused: false,
+            showsPause: false
+        )
+        .padding(.horizontal, 20)
+        .padding(.bottom, 12)
+
+        if let errorMessage {
+            VStack(spacing: 8) {
+                Label(errorMessage, systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.red)
+                if providerFailed {
+                    Button("Choose a different AI") { state.back() }
+                        .controlSize(.large)
+                }
+            }
+            .padding(.bottom, 8)
+        }
+
+        ContactListView(
+            people: people,
+            query: .constant(""),
+            subtitle: { profiles[$0.id]?.facts.occupation }
+        ) { person in
+            trailing(person)
+        }
+
+        // In the layout from the start so the list doesn't jump when the first profile
+        // lands; until then there is nothing partial to continue with.
+        Button("Continue with partial results", action: stop)
+            .controlSize(.large)
+            .padding(.vertical, 16)
+            .opacity(done.isEmpty ? 0 : 1)
+            .disabled(done.isEmpty)
+            .accessibilityHidden(done.isEmpty)
+            .animation(.snappy, value: done.isEmpty)
     }
 
     @ViewBuilder
@@ -113,6 +140,9 @@ struct ExtractView: View {
     /// with nothing left to extract — everyone selected has already been written up — moves
     /// straight on, with the finished rows on screen while it does.
     private func extract() async {
+        // Nothing picked at all: the screen says so and leaves the move to the user, rather than
+        // skipping past a step they came to on purpose.
+        guard !nothingToExtract else { return }
         load()
 
         guard state.extractor == nil else {
