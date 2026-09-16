@@ -30,3 +30,17 @@ import Foundation
     Keychain.delete(account: account)
     #expect(Keychain.get(account: account) == nil)
 }
+
+@Test func runShellTimesOutAndTerminatesProcess() async {
+    let clock = ContinuousClock()
+    let start = clock.now
+    let result = await ProviderDetector.runShell("/bin/sleep 30", timeout: .milliseconds(200))
+    let elapsed = clock.now - start
+    #expect(result == nil)
+    #expect(elapsed < .seconds(2))
+}
+
+@Test func runShellHappyPath() async {
+    let result = await ProviderDetector.runShell("/bin/echo hi", timeout: .seconds(3))
+    #expect(result == "hi")
+}

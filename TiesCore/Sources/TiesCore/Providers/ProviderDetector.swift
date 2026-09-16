@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#endif
 
 /// The outcome of checking whether a provider is available on this Mac.
 /// The payload is a filesystem path, a base URL, or the literal `"Apple Intelligence"`,
@@ -88,7 +91,7 @@ public struct ProviderDetector: Sendable {
     /// found), then a handful of well-known install locations that aren't always on `PATH`
     /// for a GUI-launched process.
     public static func loginShellWhich(_ bin: String) async -> String? {
-        if let path = await runCommandV(bin) {
+        if let path = await runShell("command -v \(bin)", timeout: .seconds(3)) {
             return path
         }
         let fallbacks = [
@@ -104,36 +107,98 @@ public struct ProviderDetector: Sendable {
         return nil
     }
 
-    /// Runs `/bin/zsh -lc "command -v <bin>"`, racing it against a 3-second timeout.
-    private static func runCommandV(_ bin: String) async -> String? {
+    /// Runs `command` under `/bin/zsh -lc`, returning trimmed stdout (`nil` on empty output,
+    /// a launch failure, or a timeout). Bounded by `timeout`: if the process hasn't finished
+    /// by then, it is sent `SIGTERM` (then `SIGKILL` if it's still running shortly after), so
+    /// this call never hangs past roughly `timeout` regardless of what the child process does.
+    static func runShell(_ command: String, timeout: Duration) async -> String? {
         await withTaskGroup(of: String?.self) { group in
             group.addTask {
-                await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in
-                    let process = Process()
-                    process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-                    process.arguments = ["-lc", "command -v \(bin)"]
-                    let outputPipe = Pipe()
-                    process.standardOutput = outputPipe
-                    process.standardError = Pipe()
-                    process.terminationHandler = { _ in
-                        let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
-                        let text = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-                        continuation.resume(returning: text.isEmpty ? nil : text)
-                    }
-                    do {
-                        try process.run()
-                    } catch {
-                        continuation.resume(returning: nil)
-                    }
-                }
+                await runProcess(command)
             }
             group.addTask {
-                try? await Task.sleep(for: .seconds(3))
+                try? await Task.sleep(for: timeout)
                 return nil
             }
             let result = await group.next() ?? nil
             group.cancelAll()
             return result
+        }
+    }
+
+    /// Runs `/bin/zsh -lc "<command>"` to completion and returns its trimmed stdout (`nil` if
+    /// empty, or the process couldn't launch). If the surrounding task is cancelled while the
+    /// process is still running (e.g. by `runShell`'s timeout racing it via `cancelAll()`),
+    /// terminates the process so cancellation actually bounds the process's lifetime rather
+    /// than just giving up on awaiting it.
+    private static func runProcess(_ command: String) async -> String? {
+        let state = ProcessState()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+                process.arguments = ["-lc", command]
+                let outputPipe = Pipe()
+                let errorPipe = Pipe()
+                process.standardOutput = outputPipe
+                process.standardError = errorPipe
+
+                process.terminationHandler = { _ in
+                    // Safe to drain now: the process has already exited, so both pipes'
+                    // write ends are closed and these reads cannot block.
+                    let outData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+                    _ = errorPipe.fileHandleForReading.readDataToEndOfFile()
+                    let text = String(decoding: outData, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+                    state.resume(continuation, with: text.isEmpty ? nil : text)
+                }
+
+                state.setProcess(process)
+
+                do {
+                    try process.run()
+                } catch {
+                    state.resume(continuation, with: nil)
+                }
+            }
+        } onCancel: {
+            state.terminateIfRunning()
+        }
+    }
+
+    /// Guards a `Process` and a `CheckedContinuation` that two independent callbacks — the
+    /// process's `terminationHandler` and a task-cancellation `onCancel` — might both touch,
+    /// so the continuation resumes exactly once and the process is only ever signaled while
+    /// it's known to still be running.
+    private final class ProcessState: @unchecked Sendable {
+        private let lock = NSLock()
+        private var process: Process?
+        private var resumed = false
+
+        func setProcess(_ process: Process) {
+            lock.lock(); self.process = process; lock.unlock()
+        }
+
+        func resume(_ continuation: CheckedContinuation<String?, Never>, with value: String?) {
+            lock.lock()
+            let alreadyResumed = resumed
+            resumed = true
+            lock.unlock()
+            guard !alreadyResumed else { return }
+            continuation.resume(returning: value)
+        }
+
+        func terminateIfRunning() {
+            lock.lock()
+            let process = process
+            lock.unlock()
+            guard let process, process.isRunning else { return }
+            process.terminate()
+            let pid = process.processIdentifier
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) {
+                if process.isRunning {
+                    kill(pid, SIGKILL)
+                }
+            }
         }
     }
 }
