@@ -48,6 +48,10 @@ public actor SearchPool: SearchBackend {
         // be behind a bot wall — one retry somewhere else. A third would just be walking the
         // pool into the same wall on a worse engine.
         for _ in 0..<2 {
+            // Checked before the dispatch and again before the retry: a scan that has been
+            // stopped shouldn't spend a worker's turn, and a retry is a fresh query as far as
+            // the engine is concerned.
+            try Task.checkCancellation()
             guard let index = nextAvailableSlot() else { throw SearchBackendError.challenge }
             let worker = slots[index].worker
             do {

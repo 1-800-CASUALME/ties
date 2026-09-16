@@ -4,9 +4,10 @@ import Foundation
 /// results out of it, and how to tell when it has put up a bot wall instead.
 ///
 /// The engines are data rather than subclasses because the only thing that differs between
-/// them is those three strings — which is also what makes `scripts/spike-engines.swift` able
-/// to check a candidate engine without any of this code being involved.
-public struct SearchEngine: Sendable, Hashable, Identifiable {
+/// them is those strings and one small function — which is also what makes
+/// `scripts/spike-engines.swift` able to check a candidate engine without any of this code
+/// being involved.
+public struct SearchEngine: Sendable, Identifiable {
     /// A short, stable identifier ("duckduckgo", "bing", "brave").
     public let id: String
     /// What the UI calls this engine.
@@ -23,6 +24,14 @@ public struct SearchEngine: Sendable, Hashable, Identifiable {
     /// spike ships `false` rather than being deleted: the definition is the record of what
     /// was tried, and re-enabling it is a one-word change once its page changes again.
     public let enabled: Bool
+    /// Turns one of this engine's redirector links into the destination it points at, or
+    /// returns `nil` for a URL that isn't one of its wrappers — which is every URL on an
+    /// engine that links straight out, so most engines have no decoder at all.
+    ///
+    /// It is a function rather than a flag because each engine wraps differently: Bing
+    /// base64s the destination into a query parameter, Yahoo percent-encodes it into a path
+    /// segment, and the next one will do something else again.
+    public let linkDecoder: (@Sendable (String) -> String?)?
 
     public init(
         id: String,
@@ -30,7 +39,8 @@ public struct SearchEngine: Sendable, Hashable, Identifiable {
         urlTemplate: String,
         resultScript: String,
         challengeMarkers: [String],
-        enabled: Bool = true
+        enabled: Bool = true,
+        linkDecoder: (@Sendable (String) -> String?)? = nil
     ) {
         self.id = id
         self.name = name
@@ -38,6 +48,7 @@ public struct SearchEngine: Sendable, Hashable, Identifiable {
         self.resultScript = resultScript
         self.challengeMarkers = challengeMarkers
         self.enabled = enabled
+        self.linkDecoder = linkDecoder
     }
 
     /// This engine's results page for `query`, or `nil` if the query can't be percent-encoded
@@ -54,6 +65,49 @@ public struct SearchEngine: Sendable, Hashable, Identifiable {
     public func isChallenge(_ text: String) -> Bool {
         let lowered = text.lowercased()
         return challengeMarkers.contains { lowered.contains($0) }
+    }
+
+    /// The destination `url` really points at: the decoded target when it is one of this
+    /// engine's redirectors, and `url` itself otherwise. Every hit's URL goes through this,
+    /// because a result link that stays a redirector tells `SearchProbe` nothing — the host
+    /// and path are what say "this is a LinkedIn profile" or "this is a GitHub user".
+    public func destination(of url: String) -> String {
+        linkDecoder?(url) ?? url
+    }
+
+    // MARK: - Redirector decoding
+
+    /// Bing links out through `https://www.bing.com/ck/a?…&u=a1<base64url>&…`, where the
+    /// value after the `a1` marker is the destination URL in base64url.
+    public static func decodeBingLink(_ url: String) -> String? {
+        guard let components = URLComponents(string: url),
+              components.host?.hasSuffix("bing.com") == true,
+              components.path == "/ck/a",
+              let wrapped = components.queryItems?.first(where: { $0.name == "u" })?.value,
+              wrapped.hasPrefix("a1")
+        else {
+            return nil
+        }
+        return base64URLDecoded(String(wrapped.dropFirst(2)))
+    }
+
+    /// Yahoo links out through `https://r.search.yahoo.com/…/RU=<percent-encoded>/RK=…`. Its
+    /// plain layout links straight to the destination instead, which is why this returns
+    /// `nil` rather than failing on anything without an `/RU=` segment.
+    public static func decodeYahooLink(_ url: String) -> String? {
+        guard url.contains("search.yahoo.com"), let marker = url.range(of: "/RU=") else { return nil }
+        let rest = url[marker.upperBound...]
+        let end = rest.range(of: "/RK=")?.lowerBound ?? rest.endIndex
+        return String(rest[..<end]).removingPercentEncoding
+    }
+
+    /// base64url (the `-`/`_` alphabet, padding optional) as `Data.init(base64Encoded:)`
+    /// doesn't do it.
+    private static func base64URLDecoded(_ value: String) -> String? {
+        var padded = value.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        while padded.count % 4 != 0 { padded += "=" }
+        guard let data = Data(base64Encoded: padded) else { return nil }
+        return String(data: data, encoding: .utf8)
     }
 
     // MARK: - The engines
@@ -73,20 +127,77 @@ public struct SearchEngine: Sendable, Hashable, Identifiable {
         challengeMarkers: ["anomaly", "challenge", "bots"]
     )
 
-    /// Disabled by the spike: `li.b_algo` does match ten rows, but on a page of results that
-    /// have nothing to do with the query, and every `h2 a` href is a `bing.com/ck/a?…`
-    /// redirector rather than the destination — which `SearchProbe` can make nothing of.
+    /// Disabled by the spike, twice over: the first pass returned ten `li.b_algo` rows of
+    /// results unrelated to the query behind `bing.com/ck/a` redirectors, and pinning the
+    /// market with `&setmkt=en-US&setlang=en` got "please solve the challenge below to
+    /// continue" instead of results at all. The redirector decoder and the `cite` fallback
+    /// are kept and tested, so the day Bing serves results again this is one word away.
     public static let bing = SearchEngine(
         id: "bing",
         name: "Bing",
-        urlTemplate: "https://www.bing.com/search?q=%@",
+        urlTemplate: "https://www.bing.com/search?q=%@&setmkt=en-US&setlang=en",
         resultScript: """
-        JSON.stringify(Array.from(document.querySelectorAll('li.b_algo')).slice(0,10).map(r => ({
-          url: (r.querySelector('h2 a')||{}).href || null,
-          title: (r.querySelector('h2 a')||{}).innerText || null,
-          snippet: (r.querySelector('.b_caption p')||{}).innerText || null })))
+        JSON.stringify(Array.from(document.querySelectorAll('li.b_algo')).slice(0,10).map(r => {
+          const a = r.querySelector('h2 a') || {};
+          const cite = ((r.querySelector('cite')||{}).innerText || '').trim();
+          return { url: /^https?:\\/\\//.test(cite) ? cite : (a.href || null),
+                   title: a.innerText || null,
+                   snippet: (r.querySelector('.b_caption p')||{}).innerText || null }; }))
         """,
-        challengeMarkers: ["captcha"],
+        challengeMarkers: ["captcha", "solve the challenge"],
+        enabled: false,
+        linkDecoder: SearchEngine.decodeBingLink
+    )
+
+    /// The second engine the pool can fail over to: seven results for the spike query, every
+    /// one of them a `linkedin.com/in` profile, linked straight out with no redirector on the
+    /// anonymous layout — and titles and snippets in exactly the shape `LinkedInSnippet`
+    /// already parses.
+    ///
+    /// The rows are `div.algo`, but their title is *not* in an `h3` on that layout (the spike
+    /// census counted 0 of those against 7 rows), so the first outbound anchor in the row is
+    /// the result link and the title is taken from whichever of `h3`, a `*title*` class, the
+    /// anchor's own text or the row's second line of text exists.
+    public static let yahoo = SearchEngine(
+        id: "yahoo",
+        name: "Yahoo",
+        urlTemplate: "https://search.yahoo.com/search?p=%@",
+        resultScript: """
+        (function () {
+          const out = [], seen = new Set();
+          for (const row of document.querySelectorAll('div.algo')) {
+            const a = row.querySelector('a[href^="http"]:not([href*="yahoo.com"])');
+            if (!a || seen.has(a.href)) continue;
+            seen.add(a.href);
+            const pick = s => (((row.querySelector(s)) || {}).innerText || '').trim() || null;
+            const lines = (row.innerText || '').split('\\n').map(t => t.trim()).filter(Boolean);
+            out.push({ url: a.href,
+                       title: pick('h3') || pick('[class*="title"]') || (a.innerText || '').trim() || lines[1] || lines[0] || null,
+                       snippet: pick('.compText') || pick('p') || lines.slice(2).join(' ') || null });
+            if (out.length >= 10) break;
+          }
+          return JSON.stringify(out);
+        })()
+        """,
+        challengeMarkers: ["captcha", "solve the challenge", "not a bot"],
+        linkDecoder: SearchEngine.decodeYahooLink
+    )
+
+    /// Disabled by the spike: Mojeek answered the query with a plain `403 - Forbidden`
+    /// ("your network appears to be sending automated queries"), so `ul.results-standard li`
+    /// had nothing to match. Its selectors have never been seen to work or fail on a real
+    /// results page.
+    public static let mojeek = SearchEngine(
+        id: "mojeek",
+        name: "Mojeek",
+        urlTemplate: "https://www.mojeek.com/search?q=%@",
+        resultScript: """
+        JSON.stringify(Array.from(document.querySelectorAll('ul.results-standard li')).slice(0,10).map(r => ({
+          url: (r.querySelector('a.ob')||{}).href || null,
+          title: (r.querySelector('a.ob')||{}).innerText || null,
+          snippet: (r.querySelector('p.s')||{}).innerText || null })))
+        """,
+        challengeMarkers: ["captcha", "automated queries", "403 - forbidden"],
         enabled: false
     )
 
@@ -108,12 +219,36 @@ public struct SearchEngine: Sendable, Hashable, Identifiable {
         enabled: false
     )
 
-    /// Every engine that has been tried, in failover order. `SearchPool` uses the enabled
+    /// Every engine that has been tried, in failover order — the ones that work first, so a
+    /// challenged web view moves from DuckDuckGo to Yahoo. `SearchPool` uses the enabled
     /// ones; the rest are here as the record of what the spike found.
-    public static let all: [SearchEngine] = [.duckduckgo, .bing, .brave]
+    public static let all: [SearchEngine] = [.duckduckgo, .yahoo, .bing, .brave, .mojeek]
 
     /// The engines a pool may actually move a worker onto.
     public static var enabledEngines: [SearchEngine] { all.filter(\.enabled) }
+}
+
+/// Two engines are the same engine when everything about them but their decoder matches;
+/// functions have no equality, and an engine is identified by what it is pointed at and how
+/// it is read, of which the decoder is a consequence rather than a distinguishing part.
+extension SearchEngine: Hashable {
+    public static func == (lhs: SearchEngine, rhs: SearchEngine) -> Bool {
+        lhs.id == rhs.id
+            && lhs.name == rhs.name
+            && lhs.urlTemplate == rhs.urlTemplate
+            && lhs.resultScript == rhs.resultScript
+            && lhs.challengeMarkers == rhs.challengeMarkers
+            && lhs.enabled == rhs.enabled
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+        hasher.combine(name)
+        hasher.combine(urlTemplate)
+        hasher.combine(resultScript)
+        hasher.combine(challengeMarkers)
+        hasher.combine(enabled)
+    }
 }
 
 /// A `SearchBackend` that can be pointed at a different `SearchEngine` while it is running,
