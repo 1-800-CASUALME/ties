@@ -50,6 +50,14 @@ public struct ImportedContact: Sendable, Hashable {
 }
 
 extension ImportedContact {
+    /// True when there's no given name, family name, or organization to identify this contact
+    /// by. Both `ContactsService.fetchAll()` and `ContactSync.toRecords` skip such contacts.
+    var hasNoNameOrOrg: Bool {
+        givenName.isEmpty && familyName.isEmpty && (organization ?? "").isEmpty
+    }
+}
+
+extension ImportedContact {
     /// Shared `CNContact` -> `ImportedContact` mapping, used by both `ContactsService.fetchAll()`
     /// and `VCardImporter.parse(_:)` so the two importers read fields and labels identically.
     init(cnContact contact: CNContact, identifier: String) {

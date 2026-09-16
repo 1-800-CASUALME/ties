@@ -7,14 +7,6 @@ public enum PhoneNormalizer {
     // tables), so we build one instance and share it. It isn't `Sendable`-annotated by
     // PhoneNumberKit, but its `parse`/`format` APIs are documented as thread-safe, so a
     // `nonisolated(unsafe)` shared instance is safe under Swift 6 strict concurrency.
-    //
-    // `PhoneNumberUtility.init(metadataCallback:)` is this package's only initializer, and
-    // PhoneNumberKit 4.3.0 deprecated it wholesale (the project moved to a new repo we don't
-    // depend on) without adding a replacement, so this one line unavoidably emits a
-    // "deprecated" build warning: there's no other way to construct a `PhoneNumberUtility`
-    // from this pinned major version, short of deprecating our own public API or resorting to
-    // unsafe runtime tricks to dodge the compiler's availability check — neither is worth it
-    // to silence a single, well-understood, upstream notice.
     nonisolated(unsafe) private static let utility = PhoneNumberUtility()
 
     /// Parses `raw` (optionally using `defaultRegion` when it has no country code) and formats

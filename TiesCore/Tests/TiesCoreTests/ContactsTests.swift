@@ -26,6 +26,20 @@ import Foundation
     #expect(ch.first { $0.kind == .email }?.normalized == "sara@acme.com")
 }
 
+@Test func reimportingSameVCardDoesNotDuplicate() throws {
+    let store = try Store.inMemory()
+    let url = Bundle.module.url(forResource: "two", withExtension: "vcf", subdirectory: "Fixtures")!
+    let data = try Data(contentsOf: url)
+
+    let first = try VCardImporter.parse(data)
+    let second = try VCardImporter.parse(data)
+    #expect(first.map(\.identifier) == second.map(\.identifier))
+
+    _ = try ContactSync.sync(first, into: store)
+    _ = try ContactSync.sync(second, into: store)
+    #expect(try store.allPeople().count == 2)
+}
+
 @Test func sectionsGroupByLetter() {
     let names = ["Émile", "bob", "Alice", "123 Taxi", "Ali"]
     let s = ContactSectioner.sections(names, name: { $0 })

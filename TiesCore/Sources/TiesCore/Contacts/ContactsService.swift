@@ -42,7 +42,7 @@ public actor ContactsService {
         var results: [ImportedContact] = []
         try store.enumerateContacts(with: request) { contact, _ in
             let imported = ImportedContact(cnContact: contact, identifier: contact.identifier)
-            guard !(imported.givenName.isEmpty && imported.familyName.isEmpty && (imported.organization ?? "").isEmpty) else {
+            guard !imported.hasNoNameOrOrg else {
                 return
             }
             results.append(imported)

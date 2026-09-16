@@ -8,7 +8,7 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.11.0"),
         .package(url: "https://github.com/scinfu/SwiftSoup.git", from: "2.13.0"),
-        .package(url: "https://github.com/marmelroy/PhoneNumberKit.git", from: "4.3.0"),
+        .package(url: "https://github.com/PhoneNumberKit/PhoneNumberKit.git", from: "5.0.0"),
     ],
     targets: [
         .target(

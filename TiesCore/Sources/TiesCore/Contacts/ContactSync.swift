@@ -14,7 +14,7 @@ public enum ContactSync {
         var channels: [Channel] = []
 
         for contact in contacts {
-            guard !(contact.givenName.isEmpty && contact.familyName.isEmpty && (contact.organization ?? "").isEmpty) else {
+            guard !contact.hasNoNameOrOrg else {
                 continue
             }
 
