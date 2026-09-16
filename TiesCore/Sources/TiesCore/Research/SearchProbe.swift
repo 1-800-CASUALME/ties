@@ -56,7 +56,7 @@ public struct SearchProbe: Probe {
         let nameMatches = snippet.name.map {
             NameMatcher.similarity(personName: input.fullName, candidateName: $0) >= NameMatcher.gate
         } ?? false
-        let companyMatched = companyMatches(candidate: snippet.company, input: input)
+        let companyMatched = linkedInCompanyMatches(candidate: snippet.company, input: input)
         guard nameMatches || companyMatched else { return nil }
 
         return ProbeFinding(
@@ -74,8 +74,9 @@ public struct SearchProbe: Probe {
     }
 
     private static func generalFinding(for hit: SearchHit, input: ProbeInput) -> ProbeFinding? {
-        let nameMatches = NameMatcher.containsName("\(hit.title) \(hit.snippet)", personName: input.fullName)
-        let companyMatched = companyMatches(candidate: hit.snippet, input: input)
+        let combinedText = "\(hit.title) \(hit.snippet)"
+        let nameMatches = NameMatcher.containsName(combinedText, personName: input.fullName)
+        let companyMatched = companyMentioned(in: combinedText, input: input)
         guard nameMatches || companyMatched else { return nil }
 
         return ProbeFinding(
@@ -101,10 +102,11 @@ public struct SearchProbe: Probe {
         return evidence
     }
 
-    /// True when `candidate` (the LinkedIn snippet's parsed company, or — for non-LinkedIn
-    /// hits — the whole search snippet) matches `input.company` closely enough (normalized
-    /// Jaro-Winkler >= 0.9) to count as corroborating evidence.
-    private static func companyMatches(candidate: String?, input: ProbeInput) -> Bool {
+    /// True when the LinkedIn snippet's parsed company field matches `input.company` closely
+    /// enough (normalized Jaro-Winkler >= 0.9) to count as corroborating evidence. LinkedIn
+    /// hits have a separately parsed company field to compare against, so this uses a fuzzy
+    /// whole-string match rather than a substring search.
+    private static func linkedInCompanyMatches(candidate: String?, input: ProbeInput) -> Bool {
         guard let inputCompany = input.company, let candidate else { return false }
         let a = NameMatcher.normalize(candidate)
         let b = NameMatcher.normalize(inputCompany)
@@ -112,9 +114,22 @@ public struct SearchProbe: Probe {
         return NameMatcher.jaroWinkler(a, b) >= 0.9
     }
 
+    /// True when `input.company` (normalized, and at least 3 characters — to avoid a trivially
+    /// short company name spuriously matching unrelated text) occurs as a substring of `text`
+    /// (also normalized), e.g. "...Senior Engineer at Acme Corp..." mentioning "Acme Corp".
+    /// Used for non-LinkedIn hits, which have no separately parsed company field — just the
+    /// hit's own title+snippet text — to compare against.
+    private static func companyMentioned(in text: String, input: ProbeInput) -> Bool {
+        guard let inputCompany = input.company else { return false }
+        let normalizedCompany = NameMatcher.normalize(inputCompany)
+        guard normalizedCompany.count >= 3 else { return false }
+        return NameMatcher.normalize(text).contains(normalizedCompany)
+    }
+
     private static func isLinkedInProfile(_ urlString: String) -> Bool {
         guard let url = URL(string: urlString), let host = normalizedHost(url) else { return false }
-        return host == "linkedin.com" && url.path.hasPrefix("/in/")
+        let isLinkedInHost = host == "linkedin.com" || host.hasSuffix(".linkedin.com")
+        return isLinkedInHost && url.path.hasPrefix("/in/")
     }
 
     /// The first path component of `github.com`/`x.com`/`twitter.com` URLs, lowercased —

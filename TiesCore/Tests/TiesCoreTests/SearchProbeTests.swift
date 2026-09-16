@@ -49,3 +49,34 @@ struct FakeBackend: SearchBackend {
     let hits = try await TavilySearchBackend(apiKey: "k", client: http).search("x")
     #expect(hits == [SearchHit(url: "https://a.com", title: "A", snippet: "c")])
 }
+
+@Test func searchProbeTreatsCountrySubdomainAsLinkedInProfile() async throws {
+    let backend = FakeBackend(hits: [
+        "\"Tim Cook\" site:linkedin.com/in": [SearchHit(
+            url: "https://ca.linkedin.com/in/tim-cook-7387352b",
+            title: "Tim Cook - President of Single Cup Coffee | LinkedIn",
+            snippet: "President of Single Cup Coffee · Experience: Single Cup Coffee · Location: Ottawa"
+        )],
+    ])
+    let f = try await SearchProbe(backend: backend).run(input(name: ("Tim", "Cook")), client: FakeHTTP())
+    let li = f.first { $0.url.contains("ca.linkedin.com") }
+    #expect(li != nil)
+    #expect(li?.headline == "President of Single Cup Coffee")
+    #expect(li?.company == "Single Cup Coffee")
+    #expect(li?.location == "Ottawa")
+    #expect(li?.bodyText == nil)
+}
+
+@Test func searchProbeAllowsNonLinkedInHitThroughOnCompanySubstringMatch() async throws {
+    let backend = FakeBackend(hits: [
+        "\"Sara Ahmed\" site:github.com": [
+            SearchHit(url: "https://github.com/example", title: "jdoe · GitHub", snippet: "Senior engineer at Acme Corp working on backend systems"),
+            SearchHit(url: "https://github.com/other", title: "asmith · GitHub", snippet: "Works at a totally different company"),
+        ],
+    ])
+    let f = try await SearchProbe(backend: backend).run(input(name: ("Sara", "Ahmed"), company: "Acme Corp"), client: FakeHTTP())
+    let matched = f.first { $0.url == "https://github.com/example" }
+    #expect(matched != nil)
+    #expect(matched?.evidence.contains { $0.kind == .company && $0.weight == 3 } == true)
+    #expect(!f.contains { $0.url == "https://github.com/other" })
+}

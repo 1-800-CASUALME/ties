@@ -32,6 +32,13 @@ public final class WebKitSearchBackend: NSObject, SearchBackend, WKNavigationDel
     /// (or `didFail`) callback.
     private var navigationContinuation: CheckedContinuation<Void, Error>?
 
+    /// The `WKNavigation` `load(_:)` is currently waiting on, so delegate callbacks can tell
+    /// a stale navigation apart from the one they're actually tracking. Without this, a
+    /// timeout's `stopLoading()` can trigger an asynchronous `didFailProvisionalNavigation`
+    /// that lands *after* the next query has already installed a new `navigationContinuation`
+    /// — resuming that unrelated, still-in-flight continuation with a spurious error.
+    private var currentNavigation: WKNavigation?
+
     public init(minInterval: TimeInterval = 2.5, timeout: TimeInterval = 25) {
         self.minInterval = minInterval
         self.timeout = timeout
@@ -124,6 +131,7 @@ public final class WebKitSearchBackend: NSObject, SearchBackend, WKNavigationDel
     private func failPendingNavigation(with error: Error) {
         guard let continuation = navigationContinuation else { return }
         navigationContinuation = nil
+        currentNavigation = nil
         webView.stopLoading()
         continuation.resume(throwing: error)
     }
@@ -131,7 +139,7 @@ public final class WebKitSearchBackend: NSObject, SearchBackend, WKNavigationDel
     private func load(_ url: URL) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             navigationContinuation = continuation
-            webView.load(URLRequest(url: url))
+            currentNavigation = webView.load(URLRequest(url: url))
         }
     }
 
@@ -201,17 +209,23 @@ public final class WebKitSearchBackend: NSObject, SearchBackend, WKNavigationDel
     // MARK: - WKNavigationDelegate
 
     public func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        guard navigation === currentNavigation else { return }
         navigationContinuation?.resume()
         navigationContinuation = nil
+        currentNavigation = nil
     }
 
     public func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        guard navigation === currentNavigation else { return }
         navigationContinuation?.resume(throwing: SearchBackendError.transport(error.localizedDescription))
         navigationContinuation = nil
+        currentNavigation = nil
     }
 
     public func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        guard navigation === currentNavigation else { return }
         navigationContinuation?.resume(throwing: SearchBackendError.transport(error.localizedDescription))
         navigationContinuation = nil
+        currentNavigation = nil
     }
 }
