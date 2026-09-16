@@ -7,6 +7,11 @@
 # An id that neither source has is left without an imageset: LogoTile draws an SF Symbol
 # instead. `custom` is always an SF Symbol, so it is never fetched.
 #
+# Two ids are never fetched: `gemini` and `gemini-cli` are PNGs. Their artwork is a gradient,
+# and Xcode's asset catalogue renders no gradient in an SVG, so the SVG versions came out blank
+# in the app; both imagesets hold light/dark PNGs instead. Re-running this script must not put
+# the invisible SVGs back over them.
+#
 # Safe to re-run: each id's imageset is rewritten from scratch, and one that has stopped
 # resolving is removed rather than left pointing at a stale file.
 set -euo pipefail
@@ -46,6 +51,9 @@ logos=(
   "sambanova sambanova-color"
 )
 
+# The ids whose imageset is a hand-made PNG pair; see the note at the top.
+png_only=("gemini" "gemini-cli")
+
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
@@ -78,10 +86,17 @@ JSON
 
 fetched=()
 fallback=()
+kept=()
 
 for entry in "${logos[@]}"; do
   id="${entry%% *}"
   icon="${entry##* }"
+  case " ${png_only[*]} " in
+    *" $id "*)
+      kept+=("$id")
+      continue
+      ;;
+  esac
   file="$tmp/$id.svg"
   if fetch_svg "$lobe/$icon.svg" "$file"; then
     write_imageset "$id" "$file"
@@ -104,3 +119,5 @@ echo "Fetched ${#fetched[@]}:"
 for line in "${fetched[@]:-}"; do [ -n "$line" ] && echo "  $line"; done
 echo "SF Symbol fallback ${#fallback[@]}:"
 for line in "${fallback[@]:-}"; do [ -n "$line" ] && echo "  $line"; done
+echo "Left alone (PNG imagesets) ${#kept[@]}:"
+for line in "${kept[@]:-}"; do [ -n "$line" ] && echo "  $line"; done
