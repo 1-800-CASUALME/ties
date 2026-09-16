@@ -348,12 +348,17 @@ final class AppModel {
         searchRunsOneAtATime ? 4 : 6
     }
 
-    /// Whether the engine actually in use searches one query at a time. Read off the backend
-    /// that was built rather than the saved id, because an engine whose key has gone missing
-    /// falls back to DuckDuckGo underneath and is every bit as serial as the choice that says
-    /// DuckDuckGo.
+    /// The id of the engine that is actually searching, which is not always
+    /// `searchBackendId`: an engine whose key has gone missing falls back to DuckDuckGo
+    /// underneath, and anything deciding what the research is really doing has to ask the
+    /// backend rather than the saved choice.
+    var activeSearchBackendId: String {
+        searchBackend.id
+    }
+
+    /// Whether the engine actually in use searches one query at a time.
     var searchRunsOneAtATime: Bool {
-        searchBackend.id == AppModel.serialBackendId
+        activeSearchBackendId == AppModel.serialBackendId
     }
 
     /// The id `WebKitSearchBackend` reports.

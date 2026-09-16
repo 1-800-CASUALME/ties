@@ -32,9 +32,11 @@ struct SearchBackendChoice: Identifiable, Hashable {
 /// the Scan screen's sheet both show.
 struct SearchBackendPicker: View {
     @Binding var backend: String
-    /// Called when the key for the current engine is typed or cleared, so whoever is showing
-    /// this can rebuild the backend around it.
-    var onKeyChange: (String) -> Void = { _ in }
+    /// Called once the key for the current engine has been committed — Return, or the field
+    /// losing focus — so whoever is showing this can rebuild the backend around it. Not per
+    /// keystroke: rebuilding the backend throws away a web view, and doing that for every
+    /// character of a pasted key is work nobody asked for.
+    var onKeyCommitted: (String) -> Void = { _ in }
 
     var body: some View {
         Picker("Search with", selection: $backend) {
@@ -46,7 +48,7 @@ struct SearchBackendPicker: View {
             KeyField(
                 title: "\(SearchBackendChoice.named(backend).name) key",
                 account: account,
-                onChange: onKeyChange
+                onCommit: onKeyCommitted
             )
         }
     }
@@ -72,9 +74,9 @@ struct SearchBackendKeySheet: View {
                 .fixedSize(horizontal: false, vertical: true)
 
             if let account = choice.keyAccount {
-                KeyField(title: "\(choice.name) key", account: account) { key in
+                KeyField(title: "\(choice.name) key", account: account, onChange: { key in
                     hasKey = !key.isEmpty
-                }
+                })
             }
 
             HStack {
@@ -95,17 +97,34 @@ struct SearchBackendKeySheet: View {
 
 /// One Keychain-backed secret. Written through as it is typed, and removed when emptied, so
 /// there is nothing to save and no way to leave a stale key behind.
+///
+/// Two callbacks, because the two things watching a key field want different moments: whether
+/// there is a key yet (per keystroke) and whether the user has finished typing one (Return, or
+/// focus leaving the field). Anything that rebuilds itself around the key wants the second.
 struct KeyField: View {
     let title: String
     let account: String
+    /// Every change to the key as it is typed or cleared. Cheap reactions only.
     var onChange: (String) -> Void = { _ in }
+    /// The key as it stands once the user has finished with the field.
+    var onCommit: (String) -> Void = { _ in }
 
     @State private var value = ""
+    @FocusState private var focused: Bool
 
     var body: some View {
         SecureField(title, text: $value)
+            .focused($focused)
+            .onSubmit { onCommit(value) }
+            .onChange(of: focused) { wasFocused, isFocused in
+                if wasFocused, !isFocused { onCommit(value) }
+            }
             .onChange(of: account, initial: true) { value = Keychain.get(account: account) ?? "" }
             .onChange(of: value) { _, key in
+                // The field filling itself in from the Keychain is not a change the user made,
+                // and reporting it as one is what had Settings rebuilding the search backend
+                // every time its tab appeared.
+                guard key != (Keychain.get(account: account) ?? "") else { return }
                 if key.isEmpty {
                     Keychain.delete(account: account)
                 } else {

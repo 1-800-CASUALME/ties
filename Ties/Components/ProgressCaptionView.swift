@@ -45,6 +45,10 @@ struct ProgressCaptionView: View {
         var seconds: TimeInterval
     }
 
+    /// Where the once-a-second tick counts from for a run whose start nobody recorded. Held in
+    /// `@State` because a `.now` written in `body` would re-seed the schedule on every pass.
+    @State private var tickOrigin = Date.now
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 10) {
@@ -184,10 +188,7 @@ struct ProgressCaptionView: View {
     /// and there is no reason for the rest of the caption to be rebuilt at that rate.
     private var timeLine: some View {
         HStack(spacing: 8) {
-            TimelineView(.periodic(from: startedAt ?? .now, by: 1)) { context in
-                Text(timing(now: context.date))
-                    .monospacedDigit()
-            }
+            clockText
             Spacer(minLength: 0)
             if progress.total > 0 {
                 Text("\(progress.completed) of \(progress.total)")
@@ -197,6 +198,22 @@ struct ProgressCaptionView: View {
         .font(.caption)
         .foregroundStyle(.secondary)
         .lineLimit(1)
+    }
+
+    /// The ticking half. A run that is paused or already over gets the same line without the
+    /// `TimelineView`: neither is spending time, and a clock still running through a pause
+    /// would be counting down something that isn't happening.
+    @ViewBuilder
+    private var clockText: some View {
+        if paused || progress.finished {
+            Text(timing(now: .now))
+                .monospacedDigit()
+        } else {
+            TimelineView(.periodic(from: startedAt ?? tickOrigin, by: 1)) { context in
+                Text(timing(now: context.date))
+                    .monospacedDigit()
+            }
+        }
     }
 
     /// "12:34 left · 2:10 elapsed" — the countdown first, because on a run over hundreds of

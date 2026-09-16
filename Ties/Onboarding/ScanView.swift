@@ -85,7 +85,7 @@ struct ScanView: View {
 
             if showsHint {
                 Label(
-                    "Researching starts with Gravatar, then GitHub, username sites, the web, and their pages.",
+                    "Researching starts with Gravatar, then GitHub, the web, username sites, and their pages.",
                     systemImage: "info.circle"
                 )
                 .font(.caption)
@@ -160,8 +160,13 @@ struct ScanView: View {
 
     /// An engine that needs a key we haven't got asks for it first; a switch that quietly fell
     /// back to DuckDuckGo would look like the menu had done nothing at all.
+    ///
+    /// Picking the engine already running is the only no-op. The saved choice and the engine
+    /// actually searching can differ — a key that has gone missing falls back to DuckDuckGo
+    /// underneath — and picking the saved one again is then exactly how someone would try to
+    /// put that right, so it must not be swallowed.
     private func choose(_ choice: SearchBackendChoice) {
-        guard choice.id != model.searchBackendId else { return }
+        guard choice.id != model.searchBackendId || choice.id != model.activeSearchBackendId else { return }
         guard choice.hasKey else {
             askingKeyFor = choice
             return
@@ -235,7 +240,7 @@ struct ScanView: View {
 
         await runUntilDone()
 
-        guard !Task.isCancelled else { return }
+        guard !Task.isCancelled, state.step == .scan else { return }
         state.next()
     }
 
@@ -259,7 +264,10 @@ struct ScanView: View {
             // Cleared whether the run finished on its own or the user stopped it, so nothing
             // later mistakes a spent scanner for one still working.
             state.scanner = nil
-            guard !Task.isCancelled else { return }
+            // `Task.isCancelled` alone isn't enough: a screen being pushed off is still alive
+            // (and its task still running) for the length of the transition, so a stream that
+            // ends in that window would otherwise start a scanner nobody is left to cancel.
+            guard !Task.isCancelled, state.step == .scan else { return }
         } while restartRequested && !pendingOrder.isEmpty
     }
 

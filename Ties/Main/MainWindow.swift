@@ -85,8 +85,12 @@ struct MainWindow: View {
 
     /// Back into the wizard, from the beginning: there is nothing in the database for it to
     /// resume alongside.
+    ///
+    /// `.welcome` rather than `nil`, which is the same first screen but leaves the way out:
+    /// there is an app behind this wizard to go back to, and `WizardWindow` takes a set
+    /// resume step as its cue to offer Cancel.
     private func startSetup() {
-        model.resumeWizardStep = nil
+        model.resumeWizardStep = .welcome
         model.hasCompletedSetup = false
     }
 

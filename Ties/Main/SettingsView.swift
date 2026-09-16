@@ -247,13 +247,29 @@ private struct ProviderSettingsView: View {
 private struct ResearchSettingsView: View {
     @Environment(AppModel.self) private var model
 
-    /// Writes straight through the model, which saves the id and rebuilds the backend the next
-    /// scan will use — the same path the Scan screen's engine menu takes.
+    /// The engine the user has picked here that has no key yet, which the sheet is asking for.
+    @State private var askingKeyFor: SearchBackendChoice?
+
+    /// Reads the saved engine, and on a change takes the same path the Scan screen's menu
+    /// takes: an engine with no key is asked for one first, rather than being saved as the
+    /// choice while the research quietly carries on with DuckDuckGo underneath it.
     private var backend: Binding<String> {
         Binding(
             get: { model.searchBackendId },
-            set: { model.setSearchBackend($0) }
+            set: { choose($0) }
         )
+    }
+
+    private func choose(_ id: String) {
+        // Re-picking the engine already running is the only no-op; re-picking the saved one
+        // while something else is actually searching is how a fallback gets put right.
+        guard id != model.searchBackendId || id != model.activeSearchBackendId else { return }
+        let choice = SearchBackendChoice.named(id)
+        guard choice.hasKey else {
+            askingKeyFor = choice
+            return
+        }
+        model.setSearchBackend(id)
     }
 
     private var mode: Binding<ScanMode> {
@@ -267,8 +283,10 @@ private struct ResearchSettingsView: View {
         Form {
             Section {
                 SearchBackendPicker(backend: backend) { _ in
-                    // A key typed after the engine was chosen: rebuild, or the engine would be
-                    // selected and still searching with DuckDuckGo underneath.
+                    // A key finished after the engine was chosen: rebuild around it, or the
+                    // engine would be selected and still searching with DuckDuckGo underneath.
+                    // A key that was just cleared rebuilds too — falling back is then the
+                    // honest thing for the backend to do, and the menu says so.
                     model.setSearchBackend(model.searchBackendId)
                 }
                 ScanModePicker(mode: mode)
@@ -290,5 +308,11 @@ private struct ResearchSettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .sheet(item: $askingKeyFor) { choice in
+            SearchBackendKeySheet(choice: choice) { useIt in
+                askingKeyFor = nil
+                if useIt { model.setSearchBackend(choice.id) }
+            }
+        }
     }
 }

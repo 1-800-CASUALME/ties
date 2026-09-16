@@ -177,7 +177,10 @@ struct ExtractView: View {
         // can tell a spent extractor from one still working.
         state.extractor = nil
 
-        guard !Task.isCancelled else { return }
+        // The step check is not redundant: a screen being pushed off is still alive (and its
+        // task still running) for the length of the transition, so a run that ends in that
+        // window would otherwise push the wizard on a second time.
+        guard !Task.isCancelled, state.step == .extract else { return }
         state.next()
     }
 
@@ -189,7 +192,7 @@ struct ExtractView: View {
     private func follow() async {
         while state.extractor != nil {
             try? await Task.sleep(for: .seconds(1))
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, state.step == .extract else { return }
             reload()
 
             guard extractOrder.allSatisfy(done.contains) else { continue }
