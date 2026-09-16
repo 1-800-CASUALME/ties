@@ -12,17 +12,11 @@ struct ProviderView: View {
     @Environment(AppModel.self) private var model
     @Environment(WizardState.self) private var state
 
-    @State private var apiKey = ""
-    @State private var baseURL = ""
-    @State private var modelName = ""
     @State private var validating = false
     @State private var validationError: String?
     /// The in-flight `validate()` call, held so leaving the step or changing provider can
     /// cancel it instead of letting it finish against a screen that has moved on.
     @State private var validationTask: Task<Void, Never>?
-
-    /// The tiers in catalogue order; each becomes one row of the grid, divided from the next.
-    private let tiers: [ProviderTier] = [.onDevice, .freeCloud, .cli, .local, .paidCloud, .custom]
 
     private var selectedSpec: ProviderSpec? {
         state.providerId.flatMap(ProviderCatalog.spec)
@@ -34,14 +28,11 @@ struct ProviderView: View {
                 .font(.title2.weight(.semibold))
 
             ScrollView {
-                VStack(spacing: 12) {
-                    ForEach(tiers, id: \.self) { tier in
-                        grid(for: tier)
-                        if tier != tiers.last {
-                            Divider()
-                        }
-                    }
-                }
+                ProviderGrid(
+                    detections: state.detections,
+                    selectedId: state.providerId,
+                    onSelect: select
+                )
                 .padding(.vertical, 4)
             }
             .frame(maxHeight: .infinity)
@@ -55,52 +46,13 @@ struct ProviderView: View {
         .onDisappear(perform: cancelValidation)
     }
 
-    // MARK: - Grid
-
-    @ViewBuilder
-    private func grid(for tier: ProviderTier) -> some View {
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 84), spacing: 12)], spacing: 12) {
-            ForEach(ProviderCatalog.all.filter { $0.tier == tier }) { spec in
-                LogoTile(
-                    spec,
-                    detected: state.detections[spec.id],
-                    selected: state.providerId == spec.id
-                ) {
-                    select(spec.id)
-                }
-            }
-        }
-    }
-
     // MARK: - Selected provider
 
     @ViewBuilder
     private var details: some View {
         VStack(spacing: 10) {
             if let spec = selectedSpec {
-                if spec.needsAPIKey {
-                    HStack(spacing: 12) {
-                        SecureField("API key", text: $apiKey)
-                            .textFieldStyle(.roundedBorder)
-                            .frame(maxWidth: 260)
-                        if let url = spec.apiKeyURL.flatMap(URL.init(string:)) {
-                            Link(destination: url) {
-                                Label("Get a key", systemImage: "arrow.up.right.square")
-                            }
-                            .font(.callout)
-                        }
-                    }
-                }
-
-                if spec.tier == .local || spec.tier == .custom {
-                    HStack(spacing: 12) {
-                        TextField("Base URL", text: $baseURL)
-                            .textFieldStyle(.roundedBorder)
-                        TextField("Model", text: $modelName)
-                            .textFieldStyle(.roundedBorder)
-                            .frame(maxWidth: 180)
-                    }
-                }
+                ProviderFields(spec: spec)
 
                 if let validationError {
                     Label(validationError, systemImage: "exclamationmark.triangle")
@@ -124,9 +76,6 @@ struct ProviderView: View {
         .frame(maxWidth: .infinity)
         .animation(.snappy, value: state.providerId)
         .animation(.snappy, value: validationError)
-        .onChange(of: apiKey) { _, key in saveAPIKey(key) }
-        .onChange(of: baseURL) { _, _ in saveConfig() }
-        .onChange(of: modelName) { _, _ in saveConfig() }
     }
 
     // MARK: - Detection
@@ -164,35 +113,6 @@ struct ProviderView: View {
         state.providerId = id
         model.selectedProviderId = id
         validationError = nil
-        loadFields(for: id)
-    }
-
-    /// Reloads the editable fields from the Keychain and saved config so switching providers
-    /// never shows one provider's key or base URL under another's name.
-    private func loadFields(for id: String) {
-        let config = model.providerConfig(for: id)
-        let spec = ProviderCatalog.spec(id)
-        apiKey = Keychain.get(account: id) ?? ""
-        baseURL = config?.baseURL ?? spec?.defaultBaseURL ?? ""
-        modelName = config?.model ?? spec?.defaultModel ?? ""
-    }
-
-    private func saveAPIKey(_ key: String) {
-        guard let id = state.providerId else { return }
-        if key.isEmpty {
-            Keychain.delete(account: id)
-        } else {
-            try? Keychain.set(key, account: id)
-        }
-    }
-
-    private func saveConfig() {
-        guard let id = state.providerId else { return }
-        let base = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        let name = modelName.trimmingCharacters(in: .whitespacesAndNewlines)
-        model.setProviderConfig(
-            ProviderConfig(id: id, baseURL: base.isEmpty ? nil : base, model: name.isEmpty ? nil : name)
-        )
     }
 
     /// Builds the chosen provider and makes it answer one throwaway prompt. A key that is
