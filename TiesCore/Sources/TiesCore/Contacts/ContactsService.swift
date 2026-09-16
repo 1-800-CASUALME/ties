@@ -24,18 +24,38 @@ public actor ContactsService {
         }
     }
 
+    /// Every key the app reads except the note, which is asked for separately. Built per call
+    /// rather than held in a `static let`, because `CNKeyDescriptor` is not `Sendable`.
+    private var keys: [CNKeyDescriptor] { [
+        CNContactGivenNameKey as CNKeyDescriptor,
+        CNContactFamilyNameKey as CNKeyDescriptor,
+        CNContactOrganizationNameKey as CNKeyDescriptor,
+        CNContactJobTitleKey as CNKeyDescriptor,
+        CNContactNicknameKey as CNKeyDescriptor,
+        CNContactPhoneNumbersKey as CNKeyDescriptor,
+        CNContactEmailAddressesKey as CNKeyDescriptor,
+        CNContactUrlAddressesKey as CNKeyDescriptor,
+        CNContactPostalAddressesKey as CNKeyDescriptor,
+        CNContactThumbnailImageDataKey as CNKeyDescriptor,
+    ] }
+
     /// Fetches every contact, skipping ones with no name and no organization.
+    ///
+    /// The note is asked for first and dropped if Contacts refuses. Reading notes needs
+    /// `com.apple.developer.contacts.notes`, which Apple grants by request and which an unsigned
+    /// or locally-signed build cannot hold at all; Contacts then rejects the *whole* fetch
+    /// (`CNErrorDomain` / `CNErrorCodeUnauthorizedKeys`, 102), so without the retry a developer
+    /// build would import no contacts whatsoever. The retry is keyed on the failure rather than
+    /// on that code, so a refusal for some other reason still costs only the notes.
     public func fetchAll() throws -> [ImportedContact] {
-        let keys: [CNKeyDescriptor] = [
-            CNContactGivenNameKey as CNKeyDescriptor,
-            CNContactFamilyNameKey as CNKeyDescriptor,
-            CNContactOrganizationNameKey as CNKeyDescriptor,
-            CNContactJobTitleKey as CNKeyDescriptor,
-            CNContactPhoneNumbersKey as CNKeyDescriptor,
-            CNContactEmailAddressesKey as CNKeyDescriptor,
-            CNContactUrlAddressesKey as CNKeyDescriptor,
-            CNContactThumbnailImageDataKey as CNKeyDescriptor,
-        ]
+        do {
+            return try fetch(keys: keys + [CNContactNoteKey as CNKeyDescriptor])
+        } catch {
+            return try fetch(keys: keys)
+        }
+    }
+
+    private func fetch(keys: [CNKeyDescriptor]) throws -> [ImportedContact] {
         let request = CNContactFetchRequest(keysToFetch: keys)
         request.sortOrder = .givenName
 
