@@ -237,3 +237,138 @@ private let threeEngines = [testEngine("one"), testEngine("two"), testEngine("th
     #expect(SearchPool.nextInterval(base: 1.2, jitter: 0.7, random: { $0.lowerBound }) == 1.0)
     #expect(SearchPool.nextInterval(base: 0.1, jitter: 0, random: { _ in 0 }) == 1.0)
 }
+
+// MARK: - Engines and their redirectors
+
+@Test func bingLinksDecodeOutOfTheirRedirector() {
+    // A real `h2 a` href, captured by `scripts/spike-engines.swift`.
+    let real = "https://www.bing.com/ck/a?!&&p=e75594df152d206c39f97466348b9ea93e2bb6a9a31d453ff2823aa01bea76ccJmltdHM9MTc4OTUxNjgwMA&ptn=3&ver=2&hsh=4&fclid=240f7656-3059-68a8-0bb9-618031ae69cb&u=a1aHR0cHM6Ly9mb3J1bXMuY29tbWVudGNhbWFyY2hlLm5ldC9mb3J1bS9hZmZpY2gtMzcxNjczODctNnBsYXk&ntb=1"
+    #expect(SearchEngine.decodeBingLink(real) == "https://forums.commentcamarche.net/forum/affich-37167387-6play")
+
+    let profile = "https://www.bing.com/ck/a?!&&p=abc&u=a1aHR0cHM6Ly93d3cubGlua2VkaW4uY29tL2luL3RpbS1jb29rLTQ3NTIyYjY&ntb=1"
+    #expect(SearchEngine.decodeBingLink(profile) == "https://www.linkedin.com/in/tim-cook-47522b6")
+    #expect(SearchEngine.bing.destination(of: profile) == "https://www.linkedin.com/in/tim-cook-47522b6")
+
+    // Anything that isn't one of Bing's wrappers is already the destination and is left alone.
+    #expect(SearchEngine.decodeBingLink("https://www.linkedin.com/in/timhcook") == nil)
+    #expect(SearchEngine.decodeBingLink("https://www.bing.com/search?q=cats") == nil)
+    #expect(SearchEngine.decodeBingLink("https://www.bing.com/ck/a?u=zz123") == nil)
+    #expect(SearchEngine.bing.destination(of: "https://uk.linkedin.com/in/cooktim") == "https://uk.linkedin.com/in/cooktim")
+}
+
+@Test func yahooLinksDecodeOutOfTheirRedirector() {
+    let wrapped = "https://r.search.yahoo.com/_ylt=AwrFbFf1/RV=2/RE=1789516800/RO=10/RU=https%3a%2f%2fwww.linkedin.com%2fin%2ftim-cook-47522b6/RK=2/RS=8MsX9pRhVw-"
+    #expect(SearchEngine.decodeYahooLink(wrapped) == "https://www.linkedin.com/in/tim-cook-47522b6")
+
+    // The trailing `/RK=` segment is optional.
+    let noRK = "https://r.search.yahoo.com/_ylt=A0/RU=https%3a%2f%2fuk.linkedin.com%2fin%2fcooktim"
+    #expect(SearchEngine.decodeYahooLink(noRK) == "https://uk.linkedin.com/in/cooktim")
+
+    // The anonymous layout links straight out, which is what the spike actually saw.
+    #expect(SearchEngine.decodeYahooLink("https://www.linkedin.com/in/timhcook") == nil)
+    #expect(SearchEngine.yahoo.destination(of: "https://www.linkedin.com/in/timhcook") == "https://www.linkedin.com/in/timhcook")
+    #expect(SearchEngine.yahoo.destination(of: wrapped) == "https://www.linkedin.com/in/tim-cook-47522b6")
+}
+
+@Test func onlyTheEnginesThatPassedTheSpikeAreEnabled() {
+    #expect(SearchEngine.enabledEngines.map(\.id) == ["duckduckgo", "yahoo"])
+    #expect(SearchEngine.all.filter { !$0.enabled }.map(\.id) == ["bing", "brave", "mojeek"])
+    // Failover order: the pool moves a challenged web view onto the next *enabled* engine.
+    #expect(SearchEngine.all.first?.id == "duckduckgo")
+    #expect(SearchEngine.duckduckgo.url(for: "\"Tim Cook\" site:linkedin.com/in")?.absoluteString
+        == "https://duckduckgo.com/?ia=web&q=%22Tim%20Cook%22%20site:linkedin.com/in")
+    #expect(SearchEngine.yahoo.url(for: "a b")?.absoluteString == "https://search.yahoo.com/search?p=a%20b")
+}
+
+@Test func aPoolFailsOverFromDuckDuckGoToYahoo() async throws {
+    let a = FakeWorker(id: "a", challenges: 1)
+    let b = FakeWorker(id: "b")
+    let pool = SearchPool(workers: [a, b], engines: SearchEngine.all, failoverCooldown: .seconds(600))
+
+    _ = try await pool.search("q")
+
+    // Disabled engines are filtered out in `init`, so the next engine is the next *working* one.
+    #expect(a.engineSwitches.map(\.id) == ["yahoo"])
+}
+
+// MARK: - Cancellation
+
+/// A worker that never answers on its own: it hangs until the caller's task is cancelled,
+/// which is what a real web view three seconds into a twenty-five-second page load looks
+/// like from the pool's side.
+final class BlockingWorker: SearchBackend, @unchecked Sendable {
+    let id = "blocking"
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<[SearchHit], Error>?
+    private var hasStarted = false
+    private var cancelled = false
+
+    var started: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return hasStarted
+    }
+
+    func search(_ query: String) async throws -> [SearchHit] {
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                park(continuation)
+            }
+        } onCancel: {
+            release()
+        }
+    }
+
+    private func park(_ continuation: CheckedContinuation<[SearchHit], Error>) {
+        lock.lock()
+        hasStarted = true
+        if cancelled {
+            lock.unlock()
+            continuation.resume(throwing: CancellationError())
+            return
+        }
+        self.continuation = continuation
+        lock.unlock()
+    }
+
+    private func release() {
+        lock.lock()
+        let waiting = continuation
+        continuation = nil
+        cancelled = true
+        lock.unlock()
+        waiting?.resume(throwing: CancellationError())
+    }
+}
+
+@Test func aCancelledCallerStopsWaitingOnAWorkerThatHasNotAnswered() async throws {
+    let worker = BlockingWorker()
+    let pool = SearchPool(workers: [worker], engines: threeEngines)
+
+    let task = Task { try await pool.search("q") }
+    while !worker.started { await Task.yield() }
+
+    let clock = ContinuousClock()
+    let start = clock.now
+    task.cancel()
+    await #expect(throws: CancellationError.self) { try await task.value }
+
+    // "Promptly" meaning nothing like the 25 s a real page load would have taken.
+    #expect(clock.now - start < .seconds(2))
+}
+
+@Test func anAlreadyCancelledCallerNeverReachesAWorker() async throws {
+    let log = CallLog()
+    let pool = SearchPool(workers: [FakeWorker(id: "a", log: log)], engines: threeEngines)
+
+    let task = Task {
+        // Be demonstrably cancelled *before* calling in, so this tests the pool's own check
+        // rather than a race with it.
+        while !Task.isCancelled { await Task.yield() }
+        return try await pool.search("q")
+    }
+    task.cancel()
+
+    await #expect(throws: CancellationError.self) { try await task.value }
+    #expect(log.workerIds.isEmpty)
+}

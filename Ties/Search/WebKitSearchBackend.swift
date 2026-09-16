@@ -33,10 +33,21 @@ public final class WebKitSearchBackend: NSObject, SearchEngineSwitching, WKNavig
     private let timeout: TimeInterval
     private let webView: WKWebView
 
-    /// FIFO of not-yet-started searches, each paired with the continuation that `search(_:)`
-    /// is waiting on. Only `pending.first` is ever in flight; `processNext()` pops it, runs
-    /// it, resumes its continuation, and moves on to the next one.
-    private var pending: [(query: String, continuation: CheckedContinuation<[SearchHit], Error>)] = []
+    /// One queued search: the query, the continuation `search(_:)` is waiting on, and a token
+    /// by which a caller that has been cancelled can find its own request again.
+    private struct Request {
+        let token: UUID
+        let query: String
+        let continuation: CheckedContinuation<[SearchHit], Error>
+    }
+
+    /// FIFO of not-yet-started searches. Only one is ever in flight; `processNext()` pops the
+    /// first, runs it, resumes its continuation, and moves on to the next one.
+    private var pending: [Request] = []
+    /// The request `processNext()` is running right now, if any. Held rather than kept purely
+    /// in that task's local scope so a caller that gives up mid-page-load can be resumed
+    /// immediately and the result, when it eventually arrives, dropped.
+    private var inFlight: Request?
     private var isRunning = false
 
     /// When the last page load started, so `runSearch` can wait out the rest of its
@@ -84,12 +95,46 @@ public final class WebKitSearchBackend: NSObject, SearchEngineSwitching, WKNavig
 
     // MARK: - Queueing
 
+    /// Queues `query` and waits for its turn — or for the caller to be cancelled, which is the
+    /// point of the cancellation handler: a scan that is stopped while N web views each have a
+    /// backlog would otherwise have every queued query run to its 25-second timeout before
+    /// anyone noticed nobody was waiting for it.
     private func enqueue(_ query: String) async throws -> [SearchHit] {
-        try await withCheckedThrowingContinuation { continuation in
-            pending.append((query, continuation))
-            if !isRunning {
-                processNext()
+        let token = UUID()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                // Both this and `cancel(_:)` run on the main actor, and this block runs
+                // without interleaving, so a cancellation landing either side of it is seen:
+                // before, by this check; after, by finding the request in `pending`.
+                guard !Task.isCancelled else {
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
+                pending.append(Request(token: token, query: query, continuation: continuation))
+                if !isRunning {
+                    processNext()
+                }
             }
+        } onCancel: {
+            Task { @MainActor in self.cancel(token) }
+        }
+    }
+
+    /// Resumes a cancelled caller with `CancellationError` and takes its request out of the
+    /// queue, leaving the order of everything still waiting untouched. A no-op for a request
+    /// that has already finished.
+    private func cancel(_ token: UUID) {
+        if let index = pending.firstIndex(where: { $0.token == token }) {
+            let request = pending.remove(at: index)
+            request.continuation.resume(throwing: CancellationError())
+            return
+        }
+        if let running = inFlight, running.token == token {
+            // Its page load can't be unwound from here — the web view is mid-navigation and
+            // the next query will replace it anyway — so the caller is let go now and the
+            // result is dropped when it arrives.
+            inFlight = nil
+            running.continuation.resume(throwing: CancellationError())
         }
     }
 
@@ -99,13 +144,20 @@ public final class WebKitSearchBackend: NSObject, SearchEngineSwitching, WKNavig
             return
         }
         isRunning = true
-        let next = pending.removeFirst()
+        let request = pending.removeFirst()
+        inFlight = request
         Task {
+            let result: Result<[SearchHit], Error>
             do {
-                let hits = try await runSearch(next.query)
-                next.continuation.resume(returning: hits)
+                result = .success(try await runSearch(request.query))
             } catch {
-                next.continuation.resume(throwing: error)
+                result = .failure(error)
+            }
+            // A caller that gave up mid-query has already been resumed by `cancel(_:)`, which
+            // cleared `inFlight`; resuming its continuation a second time would trap.
+            if inFlight?.token == request.token {
+                inFlight = nil
+                request.continuation.resume(with: result)
             }
             processNext()
         }
@@ -187,7 +239,7 @@ public final class WebKitSearchBackend: NSObject, SearchEngineSwitching, WKNavig
                 try await Task.sleep(nanoseconds: 1_000_000_000)
             }
             if let raw = try await evaluateJS(engine.resultScript),
-               let hits = Self.decodeHits(raw), !hits.isEmpty {
+               let hits = Self.decodeHits(raw, engine: engine), !hits.isEmpty {
                 return hits
             }
         }
@@ -215,7 +267,10 @@ public final class WebKitSearchBackend: NSObject, SearchEngineSwitching, WKNavig
         }
     }
 
-    private static func decodeHits(_ json: String) -> [SearchHit]? {
+    /// Turns the result script's JSON into hits, putting every URL through the engine's
+    /// redirector decoder first: a hit that stays an engine's own `…/ck/a?u=…` link says
+    /// nothing about whose page it is, which is the only thing `SearchProbe` reads a URL for.
+    private static func decodeHits(_ json: String, engine: SearchEngine) -> [SearchHit]? {
         guard let data = json.data(using: .utf8),
               let raw = try? JSONDecoder().decode([RawHit].self, from: data)
         else {
@@ -223,7 +278,11 @@ public final class WebKitSearchBackend: NSObject, SearchEngineSwitching, WKNavig
         }
         return raw.compactMap { hit in
             guard let url = hit.url, let title = hit.title else { return nil }
-            return SearchHit(url: url, title: title, snippet: hit.snippet ?? "")
+            return SearchHit(
+                url: engine.destination(of: url),
+                title: title,
+                snippet: hit.snippet ?? ""
+            )
         }
     }
 
