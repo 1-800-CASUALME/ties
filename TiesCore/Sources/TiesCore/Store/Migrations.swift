@@ -87,6 +87,34 @@ enum Migrations {
             }
         }
 
+        migrator.registerMigration("v2") { db in
+            try db.create(table: "signal") { t in
+                t.primaryKey("personId", .text).references("person", onDelete: .cascade)
+                for c in ["aliases", "honorifics", "titles", "companies", "links", "phones", "emails", "sources"] {
+                    t.column(c, .text).notNull().defaults(to: "[]")
+                }
+                t.column("location", .text)
+                t.column("lastContact", .datetime)
+                t.column("interactions", .integer).notNull().defaults(to: 0)
+                t.column("collectedAt", .datetime).notNull()
+            }
+            try db.create(table: "smartList") { t in
+                t.primaryKey("id", .text)
+                t.column("name", .text).notNull()
+                t.column("systemImage", .text).notNull()
+                t.column("personIds", .text).notNull()
+                t.column("createdAt", .datetime).notNull()
+            }
+            try db.create(table: "judgement") { t in
+                t.primaryKey("personId", .text).references("person", onDelete: .cascade)
+                t.column("candidateId", .text).notNull()
+                t.column("confidence", .double).notNull()
+                t.column("reason", .text).notNull()
+                t.column("providerId", .text).notNull()
+                t.column("judgedAt", .datetime).notNull()
+            }
+        }
+
         return migrator
     }
 }

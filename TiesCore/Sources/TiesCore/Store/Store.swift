@@ -37,6 +37,9 @@ public final class Store: Sendable {
         try writer.write { db in
             _ = try Job.deleteAll(db)
             try db.execute(sql: "DELETE FROM profile_fts")
+            // Smart lists hold personIds but have no foreign key to cascade from, so deleting
+            // every person would otherwise leave lists of dangling ids behind.
+            _ = try SmartListRow.deleteAll(db)
             _ = try Person.deleteAll(db)
         }
         try writer.vacuum()

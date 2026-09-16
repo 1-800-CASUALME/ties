@@ -12,6 +12,12 @@ public struct ScoringWeights: Sendable {
     /// A page or profile whose name matches the contact. Small on its own — a namesake is
     /// still a namesake — but enough to surface the candidate as "Unsure" for a human to judge.
     public var name: Double
+    /// A link the person shared or signed with themselves — they pointed at this profile, so on
+    /// its own it is enough to auto-accept.
+    public var selfLink: Double
+    public var selfName: Double
+    public var signatureTitle: Double
+    public var honorific: Double
     public var conflict: Double
     public var autoThreshold: Double
     public var pendingThreshold: Double
@@ -24,6 +30,10 @@ public struct ScoringWeights: Sendable {
         avatar: Double = 2.0,
         username: Double = 1.5,
         name: Double = 1.0,
+        selfLink: Double = 6.0,
+        selfName: Double = 2.0,
+        signatureTitle: Double = 2.0,
+        honorific: Double = 1.0,
         conflict: Double = -3.0,
         autoThreshold: Double = 6.0,
         pendingThreshold: Double = 1.0
@@ -35,6 +45,10 @@ public struct ScoringWeights: Sendable {
         self.avatar = avatar
         self.username = username
         self.name = name
+        self.selfLink = selfLink
+        self.selfName = selfName
+        self.signatureTitle = signatureTitle
+        self.honorific = honorific
         self.conflict = conflict
         self.autoThreshold = autoThreshold
         self.pendingThreshold = pendingThreshold
@@ -54,6 +68,10 @@ public struct ScoringWeights: Sendable {
         case .username: return username
         case .conflict: return conflict
         case .name: return name
+        case .selfLink: return selfLink
+        case .selfName: return selfName
+        case .signatureTitle: return signatureTitle
+        case .honorific: return honorific
         }
     }
 }
