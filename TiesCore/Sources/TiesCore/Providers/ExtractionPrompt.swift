@@ -40,23 +40,32 @@ public enum ExtractionPrompt {
     /// Renders the collected pages as source text and splits it into chunks of at most
     /// `maxTokens` tokens.
     ///
-    /// Each page opens with a `[src:<id>] ` marker line so the model can cite the page a
-    /// fact came from, and pages are joined line-by-line (rather than as indivisible blocks)
-    /// so the chunker can pack several small pages together and split a large one.
+    /// Every line carries its own `[src:<id>] ` marker, so a chunk boundary can fall
+    /// anywhere — mid-page, between pages — and the model can still cite the page each line
+    /// came from. Pages are joined line-by-line rather than as indivisible blocks, so the
+    /// chunker can pack several small pages together and split a large one.
     public static func chunkedSources(_ pages: [SourcePage], maxTokens: Int) -> [String] {
-        let document = pages.compactMap(block).joined(separator: "\n")
+        let document = pages.flatMap { markedLines(for: $0, maxTokens: maxTokens) }.joined(separator: "\n")
         return TextChunker.chunks(document, maxTokens: maxTokens)
     }
 
-    /// One page as "[src:id] title — snippet" followed by its body text, or `nil` when the
-    /// page carries no text worth sending.
-    private static func block(_ page: SourcePage) -> String? {
+    /// One page as `[src:<id>] `-prefixed lines: the "title — snippet" heading, then its body
+    /// text. Each line is pre-split to fit inside a single chunk (marker included), so the
+    /// chunker only ever splits *between* lines and never orphans text from its marker.
+    /// A page with no text at all contributes no lines.
+    private static func markedLines(for page: SourcePage, maxTokens: Int) -> [String] {
+        let marker = "[src:\(page.id)] "
+        // Reserve the marker's own tokens (~4 characters each, rounded up) out of the budget.
+        let budget = max(1, maxTokens - (marker.count + 3) / 4)
+
         let heading = [nonEmpty(page.title), nonEmpty(page.snippet)].compactMap { $0 }.joined(separator: " — ")
-        let body = nonEmpty(page.bodyText)
-        if heading.isEmpty && body == nil { return nil }
-        var block = "[src:\(page.id)] \(heading)".trimmingCharacters(in: .whitespaces)
-        if let body { block += "\n\(body)" }
-        return block
+        var lines = TextChunker.chunks(heading, maxTokens: budget)
+        if let body = nonEmpty(page.bodyText) {
+            for line in body.components(separatedBy: .newlines) {
+                lines += TextChunker.chunks(line, maxTokens: budget)
+            }
+        }
+        return lines.map { marker + $0 }
     }
 
     private static func nonEmpty(_ value: String?) -> String? {

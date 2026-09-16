@@ -24,6 +24,15 @@ public struct CLIRunResult: Sendable {
 /// and the write end closed so the child sees EOF, and the whole thing is bounded by a
 /// timeout that actually signals the process rather than just abandoning the await.
 public enum CLIRunner {
+    /// Ignore `SIGPIPE` for the whole process, once, before the first child is launched.
+    /// A CLI that exits before reading its prompt (crashed, not signed in, `--help`) leaves
+    /// us writing to a closed pipe, and the default `SIGPIPE` disposition would take the
+    /// whole app down instead of failing that one write with `EPIPE`.
+    private static let sigpipeIgnored: Bool = {
+        signal(SIGPIPE, SIG_IGN)
+        return true
+    }()
+
     /// The runner every CLI provider uses unless a test injects its own.
     public static let defaultRun: CLIRun = {
         try await CLIRunner.run(executable: $0, arguments: $1, stdin: $2)
@@ -74,6 +83,7 @@ public enum CLIRunner {
         arguments: [String],
         stdin: String?
     ) async throws -> CLIRunResult {
+        _ = sigpipeIgnored
         let state = ProcessState()
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<CLIRunResult, Error>) in
@@ -134,8 +144,12 @@ public enum CLIRunner {
                 let writer = inputPipe.fileHandleForWriting
                 if let stdin {
                     DispatchQueue.global().async {
-                        writer.write(Data(stdin.utf8))
-                        try? writer.close()
+                        // The child may exit before reading any of this; with SIGPIPE ignored
+                        // that surfaces as a thrown EPIPE, which costs us nothing here — the
+                        // result still comes from the termination handler. Closing in a defer
+                        // guarantees EOF for a child that *is* still reading.
+                        defer { try? writer.close() }
+                        try? writer.write(contentsOf: Data(stdin.utf8))
                     }
                 } else {
                     // Close anyway: a child reading stdin needs EOF, not an open empty pipe.
