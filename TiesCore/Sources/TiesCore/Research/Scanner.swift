@@ -217,11 +217,11 @@ public actor Scanner {
                     stage: probe.displayName, finishedStages: finishedStages,
                     notice: skippedProbes.isEmpty ? nil : Scanner.searchSkippedNotice
                 ))
-                defer { finishedStages.append(probe.displayName) }
                 do {
                     let result = try await probe.run(probeInput, client: client)
                     findings.append(contentsOf: result)
                     challenges[probe.id] = 0
+                    finishedStages.append(probe.displayName)
                 } catch SearchBackendError.challenge {
                     challenges[probe.id, default: 0] += 1
                     if challenges[probe.id, default: 0] >= maxChallenges {
@@ -245,6 +245,7 @@ public actor Scanner {
                             let retryResult = try await probe.run(probeInput, client: client)
                             findings.append(contentsOf: retryResult)
                             challenges[probe.id] = 0
+                            finishedStages.append(probe.displayName)
                         } catch {
                             errors.append("\(probe.id): \(error)")
                             if case SearchBackendError.challenge = error {
@@ -262,6 +263,7 @@ public actor Scanner {
                         do {
                             let retryResult = try await probe.run(probeInput, client: client)
                             findings.append(contentsOf: retryResult)
+                            finishedStages.append(probe.displayName)
                         } catch {
                             errors.append("\(probe.id): \(error)")
                         }
