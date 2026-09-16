@@ -1,0 +1,49 @@
+import Observation
+import SwiftUI
+import TiesCore
+
+/// The eight screens of first-run setup, in order. The raw values drive both `StepDots` and
+/// `next()`/`back()`.
+enum WizardStep: Int, CaseIterable {
+    case welcome, access, select, scan, review, provider, extract, done
+}
+
+/// Everything the setup wizard collects as the user moves through it: contacts imported,
+/// people selected, scan and extraction progress, and the chosen provider. Owned by
+/// `WizardWindow` and handed to every screen through the environment; it is deliberately
+/// separate from `AppModel` because all of it is thrown away once setup finishes.
+@MainActor
+@Observable
+final class WizardState {
+    var step: WizardStep = .welcome
+    /// Which edge the incoming screen slides in from, so `back()` reverses the push.
+    var direction: Edge = .trailing
+
+    var access: ContactsAccess = .notDetermined
+    var contactCount = 0
+    /// Contacts read from the address book, or parsed from a `.vcf` when access is denied.
+    var imported: [ImportedContact] = []
+    /// Person ids (equal to `ImportedContact.identifier` after the sync) chosen for research.
+    var selectedIds: Set<String> = []
+
+    var scanProgress = ScanProgress(completed: 0, total: 0)
+    var extractProgress = ScanProgress(completed: 0, total: 0)
+    var selectedForExtract: Set<String> = []
+    var scanner: ResearchScanner?
+
+    var providerId: String?
+    /// What `ProviderDetector` found for each provider id on the provider screen.
+    var detections: [String: DetectResult] = [:]
+
+    func next() {
+        guard let step = WizardStep(rawValue: step.rawValue + 1) else { return }
+        direction = .trailing
+        withAnimation(.snappy) { self.step = step }
+    }
+
+    func back() {
+        guard let step = WizardStep(rawValue: step.rawValue - 1) else { return }
+        direction = .leading
+        withAnimation(.snappy) { self.step = step }
+    }
+}
