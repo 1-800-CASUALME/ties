@@ -8,6 +8,10 @@ import Foundation
 /// so the two optional strings are declared nullable instead of omitted. Providers that are
 /// less strict accept the same document unchanged.
 public enum ProfileFactsSchema {
+    /// What this schema is called where a provider labels its structured output: OpenAI's
+    /// `json_schema.name`, Anthropic's tool name.
+    public static let name = "profile_facts"
+
     /// The schema as a compact JSON string (sorted keys, so it is byte-stable across runs
     /// and safe to paste into a prompt or pass to a CLI).
     public static let json: String = {

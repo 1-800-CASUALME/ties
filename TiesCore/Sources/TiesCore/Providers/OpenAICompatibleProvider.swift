@@ -7,7 +7,8 @@ import Foundation
 /// Structured output is requested with `response_format: json_schema` in strict mode.
 /// Plenty of OpenAI-compatible servers implement the endpoint but not that field, so a 400
 /// that names it is answered by retrying once in plain JSON mode with the schema pasted into
-/// the system prompt — the same request, degraded, rather than a failed extraction.
+/// the system prompt — the same request, degraded, rather than a failed call. That fallback
+/// belongs to `complete`, so it covers every schema the app asks for, not just extraction.
 public struct OpenAICompatibleProvider: AIProvider {
     public let spec: ProviderSpec
     private let baseURL: String
@@ -32,26 +33,32 @@ public struct OpenAICompatibleProvider: AIProvider {
         self.client = client
     }
 
-    public func extractChunk(system: String, user: String) async throws -> ProfileFacts {
+    public func complete(
+        system: String,
+        user: String,
+        schemaJSON: String,
+        schemaName: String
+    ) async throws -> Data {
+        let schema = try SchemaJSON.value(schemaJSON)
         do {
-            return try await complete(system: system, user: user, useJSONSchema: true)
+            return try await send(system: system, user: user, schema: schema, schemaName: schemaName)
         } catch let error as HTTPError {
             guard case .status(400, let body) = error, mentionsSchemaSupport(body) else {
                 throw ProviderError.from(error)
             }
-            let relaxedSystem = "\(system)\n\nReturn only JSON matching this schema:\n\(ProfileFactsSchema.json)"
+            let relaxedSystem = "\(system)\n\nReturn only JSON matching this schema:\n\(schemaJSON)"
             do {
-                return try await complete(system: relaxedSystem, user: user, useJSONSchema: false)
+                return try await send(system: relaxedSystem, user: user, schema: nil, schemaName: schemaName)
             } catch let retryError as HTTPError {
                 throw ProviderError.from(retryError)
             }
         }
     }
 
-    /// One `/chat/completions` round trip. Throws `HTTPError` untouched so the caller can
-    /// decide between retrying and mapping, and `ProviderError` for anything about the
-    /// answer's shape.
-    private func complete(system: String, user: String, useJSONSchema: Bool) async throws -> ProfileFacts {
+    /// One `/chat/completions` round trip. A `schema` asks for strict structured output;
+    /// `nil` asks for plain JSON mode. Throws `HTTPError` untouched so the caller can decide
+    /// between retrying and mapping, and `ProviderError` for anything about the answer's shape.
+    private func send(system: String, user: String, schema: Any?, schemaName: String) async throws -> Data {
         guard let url = URL(string: "\(baseURL.trimmingTrailingSlashes())/chat/completions") else {
             throw ProviderError.badResponse("invalid base URL: \(baseURL)")
         }
@@ -64,13 +71,13 @@ public struct OpenAICompatibleProvider: AIProvider {
             ],
             "temperature": 0,
         ]
-        if useJSONSchema {
+        if let schema {
             body["response_format"] = [
                 "type": "json_schema",
                 "json_schema": [
-                    "name": "profile_facts",
+                    "name": schemaName,
                     "strict": true,
-                    "schema": ProfileFactsSchema.schemaValue(),
+                    "schema": schema,
                 ] as [String: Any],
             ]
         } else {
@@ -92,7 +99,8 @@ public struct OpenAICompatibleProvider: AIProvider {
         return try parse(response)
     }
 
-    private func parse(_ response: HTTPResponse) throws -> ProfileFacts {
+    /// The assistant message's content as the bytes the caller decodes.
+    private func parse(_ response: HTTPResponse) throws -> Data {
         let envelope = try? JSONSerialization.jsonObject(with: response.body)
         guard
             let choices = (envelope as? [String: Any])?["choices"] as? [[String: Any]],
@@ -102,7 +110,7 @@ public struct OpenAICompatibleProvider: AIProvider {
         }
 
         if let content = message["content"] as? String, !content.isEmpty {
-            return try ProfileFactsSchema.decode(Data(content.utf8))
+            return Data(content.utf8)
         }
         // A strict-mode model that declines answers with `refusal` and a null `content`.
         if let refusal = message["refusal"] as? String, !refusal.isEmpty {

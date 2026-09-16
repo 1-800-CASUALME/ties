@@ -104,7 +104,9 @@ import Foundation
         let spec = ProviderCatalog.spec("custom")!
         // Keyed on the prompt's length: a stable per-chunk identity that doesn't depend on
         // where the chunk boundary happened to land.
-        func extractChunk(system: String, user: String) async throws -> ProfileFacts { ProfileFacts(canHelpWith: [String(user.count)]) }
+        func complete(system: String, user: String, schemaJSON: String, schemaName: String) async throws -> Data {
+            Data(#"{"canHelpWith":["\#(user.count)"]}"#.utf8)
+        }
         func validate() async throws {}
     }
     let p = Person(givenName: "A", familyName: "B")
@@ -171,7 +173,7 @@ import Foundation
     #expect(http.requested.first == "https://api.anthropic.com/v1/messages")
     #expect(http.sentHeaders.first?["x-api-key"] == "sk-test")
     #expect(http.sentHeaders.first?["anthropic-version"] == "2023-06-01")
-    #expect(String(decoding: http.sentBodies[0], as: UTF8.self).contains("save_profile"))
+    #expect(String(decoding: http.sentBodies[0], as: UTF8.self).contains("profile_facts"))
 }
 
 @Test func factoryBuildsProvidersOrSaysWhyItCannot() throws {
@@ -199,10 +201,10 @@ import Foundation
         let spec = ProviderCatalog.spec("custom")!
         let limit: Int
         let calls: Calls
-        func extractChunk(system: String, user: String) async throws -> ProfileFacts {
+        func complete(system: String, user: String, schemaJSON: String, schemaName: String) async throws -> Data {
             await calls.record()
             if user.count > limit { throw ProviderError.contextTooLarge }
-            return ProfileFacts(canHelpWith: ["ok"])
+            return Data(#"{"canHelpWith":["ok"]}"#.utf8)
         }
         func validate() async throws {}
     }
@@ -244,4 +246,139 @@ import Foundation
     await #expect(throws: ProviderError.badResponse("not logged in")) {
         try await p.extractChunk(system: "s", user: "u")
     }
+}
+
+// MARK: - Task 9: generic schema-constrained completions
+
+/// A schema unrelated to profile facts, so a test that passes it proves `complete` is generic
+/// rather than quietly reusing `ProfileFactsSchema`.
+private let judgeSchema = #"{"additionalProperties":false,"properties":{"verdict":{"type":"string"}},"required":["verdict"],"type":"object"}"#
+
+@Test func jsonExtractorFindsFirstBalancedObject() {
+    func text(_ data: Data?) -> String? { data.map { String(decoding: $0, as: UTF8.self) } }
+
+    #expect(text(JSONExtractor.firstObject(in: "Sure! {\"a\":{\"b\":[1,2]}} — hope that helps")) == #"{"a":{"b":[1,2]}}"#)
+    // Braces inside a string are not nesting.
+    #expect(text(JSONExtractor.firstObject(in: #"prose {"a":"}{"} tail"#)) == #"{"a":"}{"}"#)
+    // An escaped quote does not end the string, so the brace after it is still literal.
+    #expect(text(JSONExtractor.firstObject(in: ##"{"a":"say \"}\" now"} tail"##)) == ##"{"a":"say \"}\" now"}"##)
+    // The *first* object wins, even when a second follows.
+    #expect(text(JSONExtractor.firstObject(in: #"{"a":1} {"b":2}"#)) == #"{"a":1}"#)
+    // A stray closing brace before the object is ignored.
+    #expect(text(JSONExtractor.firstObject(in: #"} leftover {"a":1}"#)) == #"{"a":1}"#)
+    #expect(JSONExtractor.firstObject(in: "no object here") == nil)
+    #expect(JSONExtractor.firstObject(in: #"{"a": 1"#) == nil)   // never closed
+}
+
+@Test func openAICompleteSendsSchemaNameAndReturnsContentBytes() async throws {
+    let http = FakeHTTP()
+    http.routes = [("chat/completions", 200, Data(#"{"choices":[{"message":{"content":"{\"verdict\":\"yes\"}"}}]}"#.utf8))]
+    let p = OpenAICompatibleProvider(spec: ProviderCatalog.spec("groq")!, baseURL: "https://x/v1", apiKey: "k", model: "m", client: http)
+
+    let data = try await p.complete(system: "s", user: "u", schemaJSON: judgeSchema, schemaName: "judge_verdict")
+    #expect(String(decoding: data, as: UTF8.self) == #"{"verdict":"yes"}"#)
+
+    let sent = String(decoding: http.sentBodies[0], as: UTF8.self)
+    #expect(sent.contains(#""name":"judge_verdict""#))
+    #expect(sent.contains(#""strict":true"#))
+    #expect(sent.contains(#""verdict""#))   // the schema itself, not the profile-facts one
+    #expect(!sent.contains("occupation"))
+}
+
+@Test func openAICompleteRetriesAnySchemaInJSONObjectMode() async throws {
+    let http = FakeHTTP()
+    http.scripted = [
+        (400, Data(#"{"error":{"message":"response_format.type json_schema is not supported"}}"#.utf8)),
+        (200, Data(#"{"choices":[{"message":{"content":"{\"verdict\":\"no\"}"}}]}"#.utf8)),
+    ]
+    let p = OpenAICompatibleProvider(spec: ProviderCatalog.spec("groq")!, baseURL: "https://x/v1", apiKey: "k", model: "m", client: http)
+
+    let data = try await p.complete(system: "s", user: "u", schemaJSON: judgeSchema, schemaName: "judge_verdict")
+    #expect(String(decoding: data, as: UTF8.self) == #"{"verdict":"no"}"#)
+    #expect(http.requested.count == 2)
+
+    let retry = String(decoding: http.sentBodies[1], as: UTF8.self)
+    #expect(retry.contains("json_object"))
+    #expect(!retry.contains("json_schema"))
+    // The degraded request still carries *this* schema, not the extraction one.
+    #expect(retry.contains("verdict"))
+    #expect(!retry.contains("occupation"))
+}
+
+@Test func anthropicCompleteSendsSchemaAsToolAndReturnsItsInput() async throws {
+    let http = FakeHTTP()
+    http.routes = [("v1/messages", 200, Data(#"{"content":[{"type":"text","text":"thinking"},{"type":"tool_use","name":"judge_verdict","input":{"verdict":"yes"}}]}"#.utf8))]
+    let p = AnthropicProvider(spec: ProviderCatalog.spec("anthropic")!, apiKey: "sk-test", model: "claude-haiku", client: http)
+
+    let data = try await p.complete(system: "s", user: "u", schemaJSON: judgeSchema, schemaName: "judge_verdict")
+    let object = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+    #expect(object["verdict"] as? String == "yes")
+
+    let sent = String(decoding: http.sentBodies[0], as: UTF8.self)
+    #expect(sent.contains(#""input_schema""#))
+    #expect(sent.contains(#""name":"judge_verdict""#))
+    #expect(sent.contains(#""verdict""#))
+    #expect(!sent.contains("occupation"))
+}
+
+@Test func claudeCLICompleteFindsTheJSONObjectAmongProse() async throws {
+    nonisolated(unsafe) var prompt: String?
+    let p = ClaudeCLIProvider(spec: ProviderCatalog.spec("claude-cli")!, executable: "/fake/claude") { _, args, stdin in
+        prompt = stdin
+        #expect(args.contains(judgeSchema))   // the CLI's own schema flag carries this schema
+        return CLIRunResult(stdout: "Sure, here it is:\n{\"verdict\":\"yes\"}\nLet me know!", stderr: "", status: 0)
+    }
+    let data = try await p.complete(system: "s", user: "u", schemaJSON: judgeSchema, schemaName: "judge_verdict")
+    #expect(String(decoding: data, as: UTF8.self) == #"{"verdict":"yes"}"#)
+    #expect(prompt?.contains("Reply with one JSON object matching this schema and nothing else:") == true)
+    #expect(prompt?.contains(judgeSchema) == true)
+}
+
+@Test func codexCLICompleteFindsTheJSONObjectAmongProse() async throws {
+    nonisolated(unsafe) var prompt: String?
+    let p = CodexCLIProvider(spec: ProviderCatalog.spec("codex-cli")!, executable: "/fake/codex") { _, args, _ in
+        prompt = args.last
+        return CLIRunResult(stdout: "thinking…\n{\"verdict\":\"yes\"}\ndone", stderr: "", status: 0)
+    }
+    let data = try await p.complete(system: "s", user: "u", schemaJSON: judgeSchema, schemaName: "judge_verdict")
+    #expect(String(decoding: data, as: UTF8.self) == #"{"verdict":"yes"}"#)
+    #expect(prompt?.contains("Reply with one JSON object matching this schema and nothing else:") == true)
+    #expect(prompt?.contains(judgeSchema) == true)
+}
+
+@Test func geminiCLICompleteFindsTheJSONObjectInsideItsEnvelope() async throws {
+    nonisolated(unsafe) var prompt: String?
+    let p = GeminiCLIProvider(spec: ProviderCatalog.spec("gemini-cli")!, executable: "/fake/gemini") { _, args, _ in
+        prompt = args.first(where: { $0.contains("Reply with one JSON object") })
+        return CLIRunResult(stdout: #"{"response":"here you go {\"verdict\":\"yes\"} bye"}"#, stderr: "", status: 0)
+    }
+    let data = try await p.complete(system: "s", user: "u", schemaJSON: judgeSchema, schemaName: "judge_verdict")
+    #expect(String(decoding: data, as: UTF8.self) == #"{"verdict":"yes"}"#)
+    #expect(prompt?.contains(judgeSchema) == true)
+}
+
+@Test func defaultExtractChunkGoesThroughComplete() async throws {
+    /// Records what the shared `extractChunk` asks `complete` for.
+    struct Recorder: AIProvider {
+        let spec = ProviderCatalog.spec("custom")!
+        let seen: Seen
+        func complete(system: String, user: String, schemaJSON: String, schemaName: String) async throws -> Data {
+            await seen.record(schemaJSON: schemaJSON, schemaName: schemaName)
+            return Data(#"{"occupation":"Baker","canHelpWith":["bread"]}"#.utf8)
+        }
+    }
+    actor Seen {
+        private(set) var schemaJSON = ""
+        private(set) var schemaName = ""
+        func record(schemaJSON: String, schemaName: String) {
+            self.schemaJSON = schemaJSON
+            self.schemaName = schemaName
+        }
+    }
+
+    let seen = Seen()
+    let facts = try await Recorder(seen: seen).extractChunk(system: "s", user: "u")
+    #expect(facts.occupation == "Baker")
+    #expect(await seen.schemaName == "profile_facts")
+    #expect(await seen.schemaJSON == ProfileFactsSchema.json)
 }

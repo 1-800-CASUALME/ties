@@ -2,14 +2,13 @@ import Foundation
 
 /// Talks to Anthropic's Messages API.
 ///
-/// Anthropic has no `response_format`, so the schema is offered as a single tool the model
-/// is forced to call: `tool_choice` pins `save_profile`, and the facts arrive as that tool
-/// call's `input` rather than as message text.
+/// Anthropic has no `response_format`, so the schema is offered as a single tool the model is
+/// forced to call: the tool is named after the schema, `tool_choice` pins it, and the answer
+/// arrives as that tool call's `input` rather than as message text.
 public struct AnthropicProvider: AIProvider {
     /// The API version header Anthropic requires on every request.
     private static let apiVersion = "2023-06-01"
     private static let endpoint = "https://api.anthropic.com/v1/messages"
-    private static let toolName = "save_profile"
 
     public let spec: ProviderSpec
     private let apiKey: String
@@ -23,22 +22,28 @@ public struct AnthropicProvider: AIProvider {
         self.client = client
     }
 
-    public func extractChunk(system: String, user: String) async throws -> ProfileFacts {
+    public func complete(
+        system: String,
+        user: String,
+        schemaJSON: String,
+        schemaName: String
+    ) async throws -> Data {
         guard let url = URL(string: Self.endpoint) else {
             throw ProviderError.badResponse("invalid endpoint: \(Self.endpoint)")
         }
 
+        let schema = try SchemaJSON.value(schemaJSON)
         let body: [String: Any] = [
             "model": model,
             "max_tokens": 1_500,
             "system": system,
             "messages": [["role": "user", "content": user]],
             "tools": [[
-                "name": Self.toolName,
-                "description": "Save the extracted profile",
-                "input_schema": ProfileFactsSchema.schemaValue(),
+                "name": schemaName,
+                "description": "Return the result as this tool's input",
+                "input_schema": schema,
             ] as [String: Any]],
-            "tool_choice": ["type": "tool", "name": Self.toolName],
+            "tool_choice": ["type": "tool", "name": schemaName],
         ]
 
         let data: Data
@@ -60,10 +65,11 @@ public struct AnthropicProvider: AIProvider {
         } catch let error as HTTPError {
             throw ProviderError.from(error)
         }
-        return try parse(response)
+        return try parse(response, toolName: schemaName)
     }
 
-    private func parse(_ response: HTTPResponse) throws -> ProfileFacts {
+    /// The forced tool call's `input`, re-serialised as the JSON bytes the caller decodes.
+    private func parse(_ response: HTTPResponse, toolName: String) throws -> Data {
         let envelope = try? JSONSerialization.jsonObject(with: response.body)
         guard let content = (envelope as? [String: Any])?["content"] as? [[String: Any]] else {
             throw ProviderError.badResponse("unexpected response: \(response.text.prefix(300))")
@@ -75,8 +81,8 @@ public struct AnthropicProvider: AIProvider {
             let input = call["input"],
             let inputData = try? JSONSerialization.data(withJSONObject: input)
         else {
-            throw ProviderError.badResponse("no \(Self.toolName) tool call in response: \(response.text.prefix(300))")
+            throw ProviderError.badResponse("no \(toolName) tool call in response: \(response.text.prefix(300))")
         }
-        return try ProfileFactsSchema.decode(inputData)
+        return inputData
     }
 }
