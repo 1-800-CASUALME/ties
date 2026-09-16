@@ -6,10 +6,11 @@ permissions:
   contents: write
 jobs:
   release:
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
-      - run: sudo xcode-select -s /Applications/Xcode_16.4.app || true
+      # Newest Xcode on the runner: the Apple on-device provider needs the macOS 26 SDK.
+      - run: sudo xcode-select -s "$(ls -d /Applications/Xcode_26*.app /Applications/Xcode_16*.app 2>/dev/null | sort -V | tail -1)" && xcodebuild -version
       - run: brew install xcodegen
       - run: scripts/build-dmg.sh
       - uses: softprops/action-gh-release@v2
