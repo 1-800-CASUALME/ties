@@ -29,7 +29,12 @@ final class WizardState {
     var scanProgress = ScanProgress(completed: 0, total: 0)
     var extractProgress = ScanProgress(completed: 0, total: 0)
     var selectedForExtract: Set<String> = []
+    /// The runs in flight, held here rather than on the screens watching them: a screen that is
+    /// rebuilt must not start a second run over people the first one is already working through,
+    /// and the stop button has to reach the actor the stream came from. Both are cleared the
+    /// moment their stream ends.
     var scanner: ResearchScanner?
+    var extractor: Extractor?
 
     var providerId: String?
     /// What `ProviderDetector` found for each provider id on the provider screen.

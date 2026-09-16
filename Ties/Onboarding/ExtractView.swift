@@ -4,22 +4,31 @@ import TiesCore
 /// Seventh screen of setup: the AI reading everything the scan collected and writing one
 /// profile per person, watched as it happens.
 ///
-/// The twin of `ScanView`, with two differences. The extractor can only be stopped, never held,
-/// so there is no pause control. And building it can fail before any work starts — the provider
-/// is assembled from the key and config chosen one screen earlier — so that failure is shown
-/// here with the way back to the AI picker, which the wizard's own Back button doesn't offer on
-/// this step.
+/// The twin of `ScanView`, with three differences. The extractor can only be stopped, never
+/// held, so there is no pause control. Building it can fail before any work starts — the
+/// provider is assembled from the key and config chosen one screen earlier — so that failure is
+/// shown here with the way back to the AI picker, which the wizard's own Back button doesn't
+/// offer on this step. And every person here costs an AI call, so anyone whose extract job is
+/// already `.done` is left out of the run: Review sends the same selection forward every time it
+/// is passed, and re-running someone would spend a second call to overwrite the profile we have.
+///
+/// Each progress event re-reads the job table (one small query, and it drives every row's
+/// shimmer) and the profile of the person the event names. The whole profile map is a statement
+/// per person, so it is read only at the start and once the run has finished.
 struct ExtractView: View {
     @Environment(AppModel.self) private var model
     @Environment(WizardState.self) private var state
 
     /// The people picked on the Review screen, in list order — also the order they run in.
     @State private var people: [Person] = []
+    /// The extract job state per person id, as of the last refresh.
+    @State private var jobStates: [String: Job.State] = [:]
     /// Ids whose extract job has reached a terminal state, so their row can stop shimmering.
     @State private var done: Set<String> = []
     @State private var profiles: [String: Profile] = [:]
-    /// The one extractor this screen started, kept so Stop acts on the run the stream came from.
-    @State private var extractor: Extractor?
+    /// Display name back to person ids: a progress event carries only a name, and this is how it
+    /// becomes the rows worth re-reading. Two contacts can share a name, so both get refreshed.
+    @State private var idsByName: [String: [String]] = [:]
     @State private var errorMessage: String?
     /// True when it was the provider that couldn't be built, so nothing ran at all and the only
     /// useful move is back to the AI picker.
@@ -63,6 +72,7 @@ struct ExtractView: View {
                 .padding(.vertical, 16)
                 .opacity(done.isEmpty ? 0 : 1)
                 .disabled(done.isEmpty)
+                .accessibilityHidden(done.isEmpty)
                 .animation(.snappy, value: done.isEmpty)
         }
         .padding(.top, 24)
@@ -94,11 +104,25 @@ struct ExtractView: View {
 
     // MARK: - The run
 
-    /// Starts the one extraction this screen is for and follows it to the end. `extractor` is
-    /// the guard against a second start if the view is ever rebuilt.
+    /// Starts the one extraction this screen is for and follows it to the end.
+    ///
+    /// A run that is genuinely still in flight already owns a stream that will advance the
+    /// wizard when it ends, so this call watches it rather than starting a second one. Arriving
+    /// with nothing left to extract — everyone selected has already been written up — moves
+    /// straight on, with the finished rows on screen while it does.
     private func extract() async {
         load()
-        guard extractor == nil else { return }
+
+        guard state.extractor == nil else {
+            await follow()
+            return
+        }
+
+        let pending = pendingOrder
+        guard !pending.isEmpty else {
+            state.next()
+            return
+        }
 
         let extractor: Extractor
         do {
@@ -108,16 +132,38 @@ struct ExtractView: View {
             providerFailed = true
             return
         }
-        self.extractor = extractor
+        state.extractor = extractor
 
-        for await progress in await extractor.run(personIds: extractOrder) {
+        for await progress in await extractor.run(personIds: pending) {
             guard !Task.isCancelled else { return }
             state.extractProgress = progress
-            refresh()
+            refresh(progress)
         }
+
+        // Cleared whether the run finished on its own or the user stopped it, so a later visit
+        // can tell a spent extractor from one still working.
+        state.extractor = nil
 
         guard !Task.isCancelled else { return }
         state.next()
+    }
+
+    /// Watches a run this screen didn't start, which is what a rebuilt view arrives to. Its own
+    /// loop owns the stream and moves the wizard on when it ends, so this only keeps the rows
+    /// current — unless that loop went away with the view that ran it, in which case nobody is
+    /// left to notice the end, and seeing the batch out is this screen's job rather than sitting
+    /// in front of a run that will never finish.
+    private func follow() async {
+        while state.extractor != nil {
+            try? await Task.sleep(for: .seconds(1))
+            guard !Task.isCancelled else { return }
+            reload()
+
+            guard extractOrder.allSatisfy(done.contains) else { continue }
+            state.extractor = nil
+            state.next()
+            return
+        }
     }
 
     /// Who to write up, in the order they are listed. Falls back to the raw selection if the
@@ -126,10 +172,17 @@ struct ExtractView: View {
         people.isEmpty ? Array(state.selectedForExtract) : people.map(\.id)
     }
 
+    /// The run itself: everyone in `extractOrder` who hasn't already been written up. A job that
+    /// failed or was skipped is worth another try; one that is `.done` is a profile we would
+    /// only be paying an AI call to replace.
+    private var pendingOrder: [String] {
+        extractOrder.filter { jobStates[$0] != .done }
+    }
+
     /// Stops starting new people. Whoever is in flight still finishes, the stream then ends,
     /// and `extract()` moves the wizard on with whatever was written.
     private func stop() {
-        Task { await extractor?.cancel() }
+        Task { await state.extractor?.cancel() }
     }
 
     /// `ProviderError`'s own `localizedDescription` is the generic one, so the cases
@@ -148,28 +201,57 @@ struct ExtractView: View {
 
     private func load() {
         do {
-            people = try model.store.allPeople().filter { state.selectedForExtract.contains($0.id) }
-            errorMessage = nil
-            refresh()
+            let selected = try model.store.allPeople().filter { state.selectedForExtract.contains($0.id) }
+            people = selected
+            idsByName = Dictionary(grouping: selected, by: \.displayName).mapValues { $0.map(\.id) }
+            reload()
         } catch {
             errorMessage = error.localizedDescription
         }
     }
 
-    /// Re-read on every progress event: two small table scans, cheaper than any
-    /// change-notification machinery and already on an event we get for free.
-    private func refresh() {
+    /// The per-event refresh: every row's job state, and the profile of only the person this
+    /// event is about. The full map is a statement per person, far too much to run on the main
+    /// actor several times a second, so it waits for the end of the run.
+    private func refresh(_ progress: ScanProgress) {
         do {
-            let jobs = try model.store.jobs(kind: .extract)
-            done = Set(
-                jobs
-                    .filter { $0.state == .done || $0.state == .failed || $0.state == .skipped }
-                    .map(\.personId)
-            )
+            try refreshJobs()
+            if progress.finished {
+                profiles = try model.store.profilesByPerson()
+            } else if let name = progress.currentName {
+                for id in idsByName[name] ?? [] {
+                    // Assigning nil removes the key, which is what a person with no profile means.
+                    profiles[id] = try model.store.profile(personId: id)
+                }
+            }
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    /// Everything the rows are drawn from, in full: for the first render, and for anywhere the
+    /// screen has no single person's event to go on.
+    private func reload() {
+        do {
+            try refreshJobs()
             profiles = try model.store.profilesByPerson()
             errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    private func refreshJobs() throws {
+        let jobs = try model.store.jobs(kind: .extract)
+        jobStates = Dictionary(
+            jobs.map { ($0.personId, $0.state) },
+            uniquingKeysWith: { _, latest in latest }
+        )
+        done = Set(
+            jobStates
+                .filter { $0.value == .done || $0.value == .failed || $0.value == .skipped }
+                .keys
+        )
     }
 }
