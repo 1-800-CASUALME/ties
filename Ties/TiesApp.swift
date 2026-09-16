@@ -44,7 +44,10 @@ struct RootView: View {
             if model.hasCompletedSetup {
                 MainWindow()
             } else {
-                WizardWindow(startingAt: model.resumeWizardStep ?? .welcome)
+                WizardWindow(
+                    startingAt: model.resumeWizardStep ?? .welcome,
+                    canCancel: model.resumeWizardStep != nil
+                )
             }
         }
         .task { await model.warmEmbedder() }
