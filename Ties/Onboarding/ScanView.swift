@@ -33,6 +33,7 @@ struct ScanView: View {
         VStack(spacing: 0) {
             ProgressCaptionView(
                 progress: state.scanProgress,
+                startedAt: state.scanStartedAt,
                 onPause: pause,
                 onResume: resume,
                 onCancel: stop,
@@ -99,6 +100,7 @@ struct ScanView: View {
 
         let scanner = model.makeScanner()
         state.scanner = scanner
+        state.scanStartedAt = .now
 
         for await progress in await scanner.run(personIds: scanOrder) {
             guard !Task.isCancelled else { return }
