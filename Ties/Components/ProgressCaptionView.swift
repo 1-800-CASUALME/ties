@@ -8,22 +8,28 @@ import TiesCore
 /// latest `ScanProgress`, so pausing is a single fact held in one place.
 struct ProgressCaptionView: View {
     let progress: ScanProgress
-    let onPause: () -> Void
-    let onResume: () -> Void
+    /// Only asked for when `showsPause` is on; a run that can't be paused leaves both alone.
+    var onPause: () -> Void = {}
+    var onResume: () -> Void = {}
     let onCancel: () -> Void
     let paused: Bool
+    /// Off for runs that can only be stopped, never held — extraction is one — so they don't
+    /// show a button that would do nothing.
+    var showsPause = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 10) {
                 ProgressView(value: Double(progress.completed), total: Double(max(progress.total, 1)))
 
-                Button(action: paused ? onResume : onPause) {
-                    Image(systemName: paused ? "play.circle" : "pause.circle")
+                if showsPause {
+                    Button(action: paused ? onResume : onPause) {
+                        Image(systemName: paused ? "play.circle" : "pause.circle")
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel(paused ? "Resume" : "Pause")
+                    .help(paused ? "Resume" : "Pause")
                 }
-                .buttonStyle(.borderless)
-                .accessibilityLabel(paused ? "Resume" : "Pause")
-                .help(paused ? "Resume" : "Pause")
 
                 Button(action: onCancel) {
                     Image(systemName: "xmark.circle")

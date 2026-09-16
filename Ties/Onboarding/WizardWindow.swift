@@ -36,11 +36,10 @@ struct WizardWindow: View {
             ScanView()
         case .review:
             ReviewView()
-        default:
-            // Replaced screen by screen in the tasks that follow.
-            Text(String(describing: state.step))
-                .font(.largeTitle)
-                .foregroundStyle(.secondary)
+        case .extract:
+            ExtractView()
+        case .done:
+            DoneView()
         }
     }
 
