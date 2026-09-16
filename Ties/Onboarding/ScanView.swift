@@ -120,7 +120,9 @@ struct ScanView: View {
         guard !state.selectedIds.isEmpty else { return false }
         return state.selectedIds.allSatisfy { id in
             guard let jobState = jobStates[id] else { return false }
-            return jobState != .queued
+            // Only a job that actually ended counts. A `.running` row left behind by a crash
+            // means the scan never finished, so it must run again.
+            return jobState == .done || jobState == .failed || jobState == .skipped
         }
     }
 
