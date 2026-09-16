@@ -5,6 +5,7 @@ import Foundation
 /// person's name.
 public struct PageFetchProbe: Probe {
     public let id = "page"
+    public let displayName = "their pages"
 
     public init() {}
 

@@ -7,6 +7,7 @@ import SwiftSoup
 /// still return a 200, and unrelated accounts that merely share the username).
 public struct UsernameProbe: Probe {
     public let id = "username"
+    public let displayName = "username sites"
 
     private let dataset: WMNDataset
     private let maxSites: Int

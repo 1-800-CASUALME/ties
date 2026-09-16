@@ -4,6 +4,7 @@ import Foundation
 /// their channels, and searching commit authorship for each of their emails.
 public struct GitHubProbe: Probe {
     public let id = "github"
+    public let displayName = "GitHub"
 
     private let token: String?
 

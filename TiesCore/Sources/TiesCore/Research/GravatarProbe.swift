@@ -6,6 +6,7 @@ import CryptoKit
 /// just means that email has no Gravatar.
 public struct GravatarProbe: Probe {
     public let id = "gravatar"
+    public let displayName = "Gravatar"
 
     private let apiKey: String?
     private let maxEmails = 3

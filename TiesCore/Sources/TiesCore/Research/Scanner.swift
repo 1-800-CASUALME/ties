@@ -194,13 +194,23 @@ public actor Scanner {
 
             var findings: [ProbeFinding] = []
             var errors: [String] = []
+            var finishedStages: [String] = []
 
             for probe in probes {
+                continuation?.yield(ScanProgress(
+                    completed: completed, total: total, currentName: displayName, finished: false,
+                    stage: probe.displayName, finishedStages: finishedStages
+                ))
+                defer { finishedStages.append(probe.displayName) }
                 do {
                     let result = try await probe.run(probeInput, client: client)
                     findings.append(contentsOf: result)
                 } catch SearchBackendError.challenge {
-                    continuation?.yield(ScanProgress(completed: completed, total: total, currentName: displayName, waitingFor: "DuckDuckGo", finished: false))
+                    continuation?.yield(ScanProgress(
+                        completed: completed, total: total, currentName: displayName,
+                        waitingFor: "DuckDuckGo", finished: false,
+                        stage: probe.displayName, finishedStages: finishedStages
+                    ))
                     await sleepUnlessCancelled(challengeBackoff)
                     if !cancelled {
                         do {

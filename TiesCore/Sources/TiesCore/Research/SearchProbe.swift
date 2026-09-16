@@ -6,6 +6,7 @@ import Foundation
 /// snippet as-is, with a username pulled from the URL path where applicable.
 public struct SearchProbe: Probe {
     public let id = "search"
+    public let displayName = "the web"
 
     private let backend: any SearchBackend
 
