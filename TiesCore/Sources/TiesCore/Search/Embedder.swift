@@ -18,8 +18,10 @@ public protocol Embedder: Sendable {
 ///
 /// `NLContextualEmbedding` is a reference type that is neither `Sendable` nor safe to load or
 /// query concurrently, so the model itself lives behind a private actor (`ModelBox`) that
-/// serializes every access to it. `NLContextualEmbedder` is a thin `Sendable` struct wrapping
-/// that actor.
+/// serializes every access to it — including the load itself, via `OnceLoader` below, so that
+/// concurrent `embed` calls share exactly one load attempt (one `requestAssets()`/`load()`
+/// pair) instead of each re-entering the load sequence and redoing it. `NLContextualEmbedder`
+/// is a thin `Sendable` struct wrapping that actor.
 public struct NLContextualEmbedder: Embedder {
     private let box = ModelBox()
 
@@ -29,13 +31,31 @@ public struct NLContextualEmbedder: Embedder {
         try await box.embed(text)
     }
 
-    /// Owns the lazily-loaded `NLContextualEmbedding` model and serializes access to it.
+    /// Owns the once-loaded `NLContextualEmbedding` model and serializes access to it.
     private actor ModelBox {
-        private var model: NLContextualEmbedding?
-        private var isLoaded = false
+        /// `NLContextualEmbedding` isn't `Sendable`, so it can't be `OnceLoader`'s `T` as-is —
+        /// `Task.value` requires a `Sendable` result to cross back out of the task it's
+        /// memoized in. It's wrapped in `UncheckedSendable` instead: the model is created
+        /// fresh *inside* this closure (nothing pre-existing is captured, so the closure is a
+        /// legitimate `@Sendable` value in the first place), and from that point on it's only
+        /// ever reachable through `OnceLoader`'s own actor-serialized memoization — nothing
+        /// else holds a competing reference to it.
+        private let loader = OnceLoader<UncheckedSendable<NLContextualEmbedding>> {
+            let embedding = NLContextualEmbedding(language: .english)!
+
+            if !embedding.hasAvailableAssets {
+                let result = try await embedding.requestAssets()
+                guard result == .available else {
+                    throw EmbedderError.unavailable
+                }
+            }
+
+            try embedding.load()
+            return UncheckedSendable(embedding)
+        }
 
         func embed(_ text: String) async throws -> [Float] {
-            let model = try await loadedModel()
+            let model = try await loader.value().value
             let dimension = model.dimension
 
             guard !text.isEmpty else {
@@ -61,26 +81,48 @@ public struct NLContextualEmbedder: Embedder {
             let divisor = Double(tokenCount)
             return sum.map { Float($0 / divisor) }
         }
+    }
+}
 
-        /// Loads the model on first use, requesting its assets first if they aren't already
-        /// on-device. Cached after the first successful call so later `embed` calls don't
-        /// re-check assets or reload.
-        private func loadedModel() async throws -> NLContextualEmbedding {
-            if let model, isLoaded { return model }
+/// Wraps a non-`Sendable` value for the one legitimate crossing `OnceLoader` needs to make: a
+/// freshly-created value, with no outside aliases at creation time, handed from the `Task` that
+/// created it back to whichever caller awaits `OnceLoader.value()`. Safe only under that
+/// discipline — this is not a general-purpose "make anything Sendable" escape hatch.
+struct UncheckedSendable<Wrapped>: @unchecked Sendable {
+    let value: Wrapped
+    init(_ value: Wrapped) { self.value = value }
+}
 
-            let embedding = model ?? NLContextualEmbedding(language: .english)!
-            model = embedding
+/// Memoizes a single async, possibly-failing load so concurrent callers share exactly one
+/// in-flight attempt instead of each racing to redo the (possibly expensive, possibly
+/// non-reentrant) work. A load that throws is not cached — it clears itself so the next call
+/// retries from scratch.
+actor OnceLoader<T: Sendable> {
+    private let load: @Sendable () async throws -> T
+    private var task: Task<T, Error>?
 
-            if !embedding.hasAvailableAssets {
-                let result = try await embedding.requestAssets()
-                if result == .notAvailable {
-                    throw EmbedderError.unavailable
-                }
-            }
+    init(_ load: @Sendable @escaping () async throws -> T) {
+        self.load = load
+    }
 
-            try embedding.load()
-            isLoaded = true
-            return embedding
+    func value() async throws -> T {
+        if let task {
+            return try await task.value
+        }
+
+        let newTask = Task { try await load() }
+        task = newTask
+
+        do {
+            return try await newTask.value
+        } catch {
+            // Always safe: `task` only ever transitions nil -> non-nil synchronously (the
+            // check above and this assignment have no `await` between them), so no concurrent
+            // caller could have raced in and replaced `newTask` with a newer attempt while we
+            // were suspended awaiting it — `task` here is still exactly the attempt that just
+            // failed, never a newer one.
+            task = nil
+            throw error
         }
     }
 }
