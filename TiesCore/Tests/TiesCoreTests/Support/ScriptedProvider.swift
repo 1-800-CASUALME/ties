@@ -33,7 +33,7 @@ final class ScriptedProvider: AIProvider, @unchecked Sendable {
     private let lock = NSLock()
 
     init(
-        spec: ProviderSpec = ProviderCatalog.spec("custom")!,
+        spec: ProviderSpec = .scriptedCloud,
         replies: [String] = [],
         latency: Duration? = nil
     ) {
@@ -42,7 +42,7 @@ final class ScriptedProvider: AIProvider, @unchecked Sendable {
         self.latency = latency
     }
 
-    init(spec: ProviderSpec = ProviderCatalog.spec("custom")!, failure: any Error) {
+    init(spec: ProviderSpec = .scriptedCloud, failure: any Error) {
         self.spec = spec
         self.replies = [.failure(failure)]
         self.latency = nil
@@ -80,3 +80,19 @@ final class ScriptedProvider: AIProvider, @unchecked Sendable {
 
 /// A provider failure a test can throw and recognise.
 struct ScriptedFailure: Error {}
+
+extension ProviderSpec {
+    /// The specs the scripted provider wears. They are written out here rather than borrowed
+    /// from `ProviderCatalog` because what these tests care about is the *tier* — whether the
+    /// model runs on this Mac (§7.5) — and not which shipped provider it is; a catalogue entry
+    /// renamed or retired should not take the AI tests down with it.
+    static let scriptedCloud = ProviderSpec(
+        id: "scripted-cloud", name: "Scripted Cloud", logo: "custom",
+        transport: .openAIChat, tier: .paidCloud, needsAPIKey: false
+    )
+
+    static let scriptedOnDevice = ProviderSpec(
+        id: "scripted-on-device", name: "Scripted On-Device", logo: "custom",
+        transport: .appleFoundation, tier: .onDevice, needsAPIKey: false
+    )
+}

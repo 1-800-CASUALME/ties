@@ -12,6 +12,8 @@ public struct QueryExpander: Sendable {
     public static let defaultTimeout: Duration = .seconds(2)
     /// At most 6 terms: more than that and the chips under the field stop being readable.
     static let maxTerms = 6
+    /// The longest a single term may be. A chip has to fit under the search field.
+    static let maxTermLength = 40
 
     private let provider: any AIProvider
     private let timeout: Duration
@@ -63,6 +65,11 @@ public struct QueryExpander: Sendable {
         var seen = Set<String>()
         return (raw.terms ?? [])
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            // A term is a job title or a skill. A multi-line one isn't a term at all — it is a
+            // model writing prose, or page text trying to smuggle something through the chips —
+            // and anything past 40 characters is a sentence, not a chip.
+            .filter { !$0.isEmpty && !$0.contains(where: \.isNewline) }
+            .map { String($0.prefix(Self.maxTermLength)).trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty && seen.insert($0.lowercased()).inserted }
             .prefix(Self.maxTerms)
             .map { $0 }

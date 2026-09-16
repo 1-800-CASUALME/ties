@@ -164,9 +164,23 @@ public actor Extractor {
             // The fact check runs on the merged facts, before they are embedded and saved, so
             // the profile lands already marked. A checker that fails is not worth failing the
             // extraction over: the facts are still good, they are just still unchecked
-            // (`supported == nil`), and the next run can check them again.
+            // (`supported == nil`), and the next run can check them again. It does say so,
+            // though — a provider whose fact-check answers never parse would otherwise look
+            // exactly like a provider that finds every fact supported.
             if let factChecker {
-                facts = (try? await factChecker.check(facts, pages: pages)) ?? facts
+                do {
+                    facts = try await factChecker.check(facts, pages: pages)
+                } catch let error as CancellationError {
+                    // Cancellation is not a failed fact check, it is the run being stopped:
+                    // swallowing it here would make this person finish as if nothing happened.
+                    throw error
+                } catch {
+                    continuation?.yield(ScanProgress(
+                        completed: completed, total: total, currentName: displayName,
+                        waitingFor: nil, finished: false,
+                        notice: "Fact check unavailable for \(displayName)"
+                    ))
+                }
             }
 
             let confidence = pages.isEmpty ? 0.3 : min(1.0, 0.4 + 0.1 * Double(pages.count))

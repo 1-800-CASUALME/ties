@@ -27,9 +27,18 @@ extension Store {
         }
     }
 
+    /// A candidate's pages in a fixed order, so callers that quote only the first few — the
+    /// candidate judge quotes two — always quote the same ones.
+    ///
+    /// The order is `kind` then `id`. Sorting on the raw kind strings happens to put the pages
+    /// with real text first (`github`, `gravatar`, `page`) and the thin ones last (`serp`,
+    /// `username`), which is the order worth quoting in; `id` makes it total.
     public func pages(candidateId: String) throws -> [SourcePage] {
         try writer.read { db in
-            try SourcePage.filter(Column("candidateId") == candidateId).fetchAll(db)
+            try SourcePage
+                .filter(Column("candidateId") == candidateId)
+                .order(Column("kind"), Column("id"))
+                .fetchAll(db)
         }
     }
 

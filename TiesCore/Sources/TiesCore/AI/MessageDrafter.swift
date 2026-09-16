@@ -3,25 +3,32 @@ import Foundation
 /// Writes the first draft of a message to one person, in the user's own register (§7.4).
 ///
 /// Nothing is sent: the draft comes back as text for the detail view to hand to Messages,
-/// WhatsApp or Mail. `registerSample` is the user's own recent messages to that person, and
-/// whether it may be passed at all is the caller's decision (§7.5: on-device, or the "let cloud
-/// AI see local signals" switch is on) — this type sends whatever it is given.
+/// WhatsApp or Mail.
+///
+/// `registerSample` is the user's own recent messages to that person — the most private thing
+/// any of these services touches. It is dropped here, not at the call site, unless the provider
+/// runs on this Mac or the user turned the "let cloud AI see local signals" switch on (§7.5),
+/// so a caller that forgets the rule cannot leak it: the draft simply comes back in a neutral
+/// register.
 public struct MessageDrafter: Sendable {
     /// The cap from §7.4. The schema asks for it too, but a word limit is not something a
     /// model reliably counts, so the draft is cut here as well.
     static let maxWords = 60
 
     private let provider: any AIProvider
+    private let shareSignals: Bool
 
-    public init(provider: any AIProvider) {
+    public init(provider: any AIProvider, shareSignals: Bool) {
         self.provider = provider
+        self.shareSignals = shareSignals
     }
 
     /// A message of at most 60 words saying what the user needs from this person.
     public func draft(need: String, person: Person, facts: ProfileFacts?, registerSample: [String]) async throws -> String {
+        let sample = (shareSignals || provider.spec.tier == .onDevice) ? registerSample : []
         let data = try await provider.complete(
             system: AIPrompts.draftSystem,
-            user: AIPrompts.draft(need: need, person: person, facts: facts, registerSample: registerSample),
+            user: AIPrompts.draft(need: need, person: person, facts: facts, registerSample: sample),
             schemaJSON: AISchemas.draft,
             schemaName: AISchemas.draftName
         )
