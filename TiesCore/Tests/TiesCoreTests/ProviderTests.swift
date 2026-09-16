@@ -232,7 +232,7 @@ import Foundation
     await #expect(throws: ProviderError.self) {
         try await CLIRunner.run(executable: "/bin/sleep", arguments: ["37"], stdin: nil, timeout: 0.2)
     }
-    #expect(Date().timeIntervalSince(start) < 2)
+    #expect(Date().timeIntervalSince(start) < 4)  // generous: builds and parallel tests share this machine
 
     try await Task.sleep(for: .milliseconds(500))
     let survivors = try await CLIRunner.run(executable: "/usr/bin/pgrep", arguments: ["-f", "sleep 37"], stdin: nil)

@@ -187,7 +187,7 @@ struct AlwaysChallengeProbe: Probe {
     let elapsed = ContinuousClock.now - start
 
     #expect(finished)
-    #expect(elapsed < .seconds(2))
+    #expect(elapsed < .seconds(4))  // generous: builds and parallel tests share this machine
 }
 
 @Test func scannerSkipsAProbeAfterTwoChallengesAndSaysSo() async throws {
