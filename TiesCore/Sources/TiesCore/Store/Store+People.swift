@@ -20,18 +20,18 @@ extension Store {
 
                 var toSave = person
                 toSave.id = existing?.id ?? person.id
+                if let existing {
+                    // Preserve the original creation time across re-syncs; everything else
+                    // (including updatedAt) comes from the incoming person.
+                    toSave.createdAt = existing.createdAt
+                }
                 resolvedIds[person.id] = toSave.id
                 try toSave.save(db)
             }
 
+            let channelsByResolvedId = Dictionary(grouping: channels) { resolvedIds[$0.personId] ?? $0.personId }
             for resolvedId in Set(resolvedIds.values) {
-                _ = try Channel.filter(Column("personId") == resolvedId).deleteAll(db)
-            }
-
-            for channel in channels {
-                var toSave = channel
-                toSave.personId = resolvedIds[channel.personId] ?? channel.personId
-                try toSave.insert(db)
+                try Self.saveChannels(channelsByResolvedId[resolvedId] ?? [], personId: resolvedId, db: db)
             }
         }
     }
@@ -40,11 +40,7 @@ extension Store {
     public func insertManualPerson(_ person: Person, channels: [Channel]) throws {
         try writer.write { db in
             try person.insert(db)
-            for channel in channels {
-                var toSave = channel
-                toSave.personId = person.id
-                try toSave.insert(db)
-            }
+            try Self.saveChannels(channels, personId: person.id, db: db)
         }
     }
 
@@ -52,12 +48,18 @@ extension Store {
     public func updatePerson(_ person: Person, channels: [Channel]) throws {
         try writer.write { db in
             try person.update(db)
-            _ = try Channel.filter(Column("personId") == person.id).deleteAll(db)
-            for channel in channels {
-                var toSave = channel
-                toSave.personId = person.id
-                try toSave.insert(db)
-            }
+            try Self.saveChannels(channels, personId: person.id, db: db)
+        }
+    }
+
+    /// Replaces the stored channels for `personId` with `channels`, remapping each channel's
+    /// `personId` to the resolved id first.
+    private static func saveChannels(_ channels: [Channel], personId: String, db: Database) throws {
+        _ = try Channel.filter(Column("personId") == personId).deleteAll(db)
+        for channel in channels {
+            var toSave = channel
+            toSave.personId = personId
+            try toSave.insert(db)
         }
     }
 

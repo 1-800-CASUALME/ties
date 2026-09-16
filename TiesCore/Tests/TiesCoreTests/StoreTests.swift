@@ -18,6 +18,20 @@ private func makeStore() throws -> Store { try Store.inMemory() }
     #expect(ch[0].kind == .phone)
 }
 
+@Test func upsertPeoplePreservesCreatedAtOnResync() throws {
+    let s = try makeStore()
+    let original = Date(timeIntervalSince1970: 1_000_000)
+    let p = Person(cnIdentifier: "cn1", givenName: "Sara", familyName: "Ahmed", organization: "Acme", createdAt: original, updatedAt: original)
+    try s.upsertPeople([p], channels: [])
+    let resynced = Person(cnIdentifier: "cn1", givenName: "Sara", familyName: "Ahmed", organization: "Beta",
+                           createdAt: original.addingTimeInterval(86400), updatedAt: original.addingTimeInterval(86400))
+    try s.upsertPeople([resynced], channels: [])
+    let all = try s.allPeople()
+    #expect(all.count == 1)
+    #expect(all[0].organization == "Beta")
+    #expect(abs(all[0].createdAt.timeIntervalSince1970 - original.timeIntervalSince1970) < 0.001)
+}
+
 @Test func searchByNameOrDigits() throws {
     let s = try makeStore()
     let a = Person(givenName: "Zoë", familyName: "Ali")
