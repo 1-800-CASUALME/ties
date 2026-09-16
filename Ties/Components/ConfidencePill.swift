@@ -21,12 +21,15 @@ struct ConfidencePill: View {
     }
 
     private enum Level {
-        case chosen, high, unsure, none
+        case chosen, rejected, high, unsure, none
     }
 
     private var level: Level {
         let weights = ScoringWeights.default
         if status == .accepted { return .chosen }
+        // Ruled out, by the user or by accepting one of its siblings. However well it scored,
+        // it is not this person, and a green "High" next to it would be a lie.
+        if status == .rejected { return .rejected }
         if status == .auto || score >= weights.autoThreshold { return .high }
         if score >= weights.pendingThreshold { return .unsure }
         return .none
@@ -35,6 +38,7 @@ struct ConfidencePill: View {
     private var label: String {
         switch level {
         case .chosen: "Chosen"
+        case .rejected: "No"
         case .high: "High"
         case .unsure: "Unsure"
         case .none: "None"
@@ -45,7 +49,7 @@ struct ConfidencePill: View {
         switch level {
         case .chosen, .high: .green
         case .unsure: .orange
-        case .none: .gray
+        case .rejected, .none: .gray
         }
     }
 }

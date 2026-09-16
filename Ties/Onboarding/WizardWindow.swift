@@ -66,10 +66,11 @@ struct WizardWindow: View {
     }
 
     /// No way back out of the first screen, and none out of a step that is already doing
-    /// work or has finished it.
+    /// work or has finished it. Review is in that company: the research behind it has already
+    /// run, and the screen has its own per-person re-run for anything that needs another look.
     private var showsBack: Bool {
         switch state.step {
-        case .welcome, .scan, .extract, .done: false
+        case .welcome, .scan, .review, .extract, .done: false
         default: true
         }
     }

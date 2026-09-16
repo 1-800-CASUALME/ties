@@ -4,18 +4,28 @@ import TiesCore
 /// Fourth screen of setup: the research itself, running while the user watches it happen.
 ///
 /// The scanner is started here and kept on `WizardState`, so the pause/resume/stop buttons act
-/// on the same actor the stream came from. Every progress event is the cue to re-read the scan
-/// jobs and the best candidate per person; both are small table scans, and doing them on an
-/// event we already get is cheaper than any change-notification machinery.
+/// on the same actor the stream came from, and is cleared again the moment the stream ends —
+/// a scanner left behind would make a second visit to this screen sit and watch a run that is
+/// already over.
+///
+/// Each progress event re-reads the job table (one small query, and it drives every row's
+/// shimmer) and the best candidate for the single person the event names. The whole
+/// best-candidate map costs a statement per person, so it is read only at the start and once
+/// the run has finished.
 struct ScanView: View {
     @Environment(AppModel.self) private var model
     @Environment(WizardState.self) private var state
 
     /// The selected contacts, in list order — also the order they are scanned in.
     @State private var people: [Person] = []
+    /// The scan job state per person id, as of the last refresh.
+    @State private var jobStates: [String: Job.State] = [:]
     /// Ids whose scan job has reached a terminal state, so their row can stop shimmering.
     @State private var done: Set<String> = []
     @State private var best: [String: Candidate] = [:]
+    /// Display name back to person id: a progress event carries only a name, and this is how it
+    /// becomes the one row worth re-reading.
+    @State private var idsByName: [String: String] = [:]
     @State private var paused = false
     @State private var errorMessage: String?
 
@@ -48,6 +58,7 @@ struct ScanView: View {
                 .padding(.vertical, 16)
                 .opacity(done.isEmpty ? 0 : 1)
                 .disabled(done.isEmpty)
+                .accessibilityHidden(done.isEmpty)
                 .animation(.snappy, value: done.isEmpty)
         }
         .padding(.top, 24)
@@ -70,11 +81,20 @@ struct ScanView: View {
 
     // MARK: - The run
 
-    /// Starts the one scan this screen is for and follows it to the end. `state.scanner` is the
-    /// guard against a second start: `.task` runs again if the view is ever rebuilt, and a
-    /// second `run` would only be rejected by the scanner anyway.
+    /// Starts the one scan this screen is for and follows it to the end.
+    ///
+    /// Arriving on a scan that has already happened moves straight on: there would be nothing
+    /// running to watch, and re-running the whole batch is not what landing back here means. A
+    /// run that is genuinely still in flight already owns a stream that will advance the wizard
+    /// when it ends, so this call leaves it alone rather than starting a second one.
     private func scan() async {
         load()
+
+        if scanFinished {
+            state.next()
+            return
+        }
+
         guard state.scanner == nil else { return }
 
         let scanner = model.makeScanner()
@@ -83,11 +103,25 @@ struct ScanView: View {
         for await progress in await scanner.run(personIds: scanOrder) {
             guard !Task.isCancelled else { return }
             state.scanProgress = progress
-            refresh()
+            refresh(progress)
         }
+
+        // Cleared whether the run finished on its own or the user stopped it, so nothing later
+        // mistakes a spent scanner for one still working.
+        state.scanner = nil
 
         guard !Task.isCancelled else { return }
         state.next()
+    }
+
+    /// Whether every selected person already has a scan job that has started — so this batch has
+    /// been run, and the rows on screen are its results rather than work in progress.
+    private var scanFinished: Bool {
+        guard !state.selectedIds.isEmpty else { return false }
+        return state.selectedIds.allSatisfy { id in
+            guard let jobState = jobStates[id] else { return false }
+            return jobState != .queued
+        }
     }
 
     /// Who to scan, in the order they are listed. Falls back to the raw selection if the people
@@ -116,26 +150,48 @@ struct ScanView: View {
 
     private func load() {
         do {
-            people = try model.store.allPeople().filter { state.selectedIds.contains($0.id) }
-            errorMessage = nil
-            refresh()
-        } catch {
-            errorMessage = error.localizedDescription
-        }
-    }
-
-    private func refresh() {
-        do {
-            let jobs = try model.store.jobs(kind: .scan)
-            done = Set(
-                jobs
-                    .filter { $0.state == .done || $0.state == .failed || $0.state == .skipped }
-                    .map(\.personId)
+            let selected = try model.store.allPeople().filter { state.selectedIds.contains($0.id) }
+            people = selected
+            idsByName = Dictionary(
+                selected.map { ($0.displayName, $0.id) },
+                uniquingKeysWith: { first, _ in first }
             )
+            try refreshJobs()
             best = try model.store.bestCandidatesByPerson()
             errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    /// The per-event refresh: every row's job state, and the best candidate for only the person
+    /// this event is about. The full map is a statement per person, far too much to run on the
+    /// main actor several times a second, so it waits for the end of the run.
+    private func refresh(_ progress: ScanProgress) {
+        do {
+            try refreshJobs()
+            if progress.finished {
+                best = try model.store.bestCandidatesByPerson()
+            } else if let id = progress.currentName.flatMap({ idsByName[$0] }) {
+                // Assigning nil removes the key, which is what a person with no candidate means.
+                best[id] = try model.store.bestCandidate(personId: id)
+            }
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func refreshJobs() throws {
+        let jobs = try model.store.jobs(kind: .scan)
+        jobStates = Dictionary(
+            jobs.map { ($0.personId, $0.state) },
+            uniquingKeysWith: { _, latest in latest }
+        )
+        done = Set(
+            jobStates
+                .filter { $0.value == .done || $0.value == .failed || $0.value == .skipped }
+                .keys
+        )
     }
 }

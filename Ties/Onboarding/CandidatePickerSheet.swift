@@ -173,13 +173,24 @@ struct CandidatePickerSheet: View {
             candidates = try model.store.candidates(personId: person.id)
             var byCandidate: [String: [Evidence]] = [:]
             for candidate in candidates {
-                byCandidate[candidate.id] = try model.store.evidence(candidateId: candidate.id)
+                byCandidate[candidate.id] = try model.store
+                    .evidence(candidateId: candidate.id)
+                    .sorted(by: Self.strongestFirst)
             }
             evidence = byCandidate
             errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    /// Conflicts first — a reason this might be the wrong person is the thing worth seeing, and
+    /// a row only has room for four chips — then the heaviest evidence for the match.
+    private static func strongestFirst(_ lhs: Evidence, _ rhs: Evidence) -> Bool {
+        if (lhs.kind == .conflict) != (rhs.kind == .conflict) {
+            return lhs.kind == .conflict
+        }
+        return lhs.weight > rhs.weight
     }
 
     private func choose(_ candidate: Candidate) {

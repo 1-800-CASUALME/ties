@@ -13,9 +13,15 @@ struct ReviewView: View {
     /// How many identities the scan found per person; more than one earns the row a badge.
     @State private var candidateCounts: [String: Int] = [:]
     @State private var picking: Person?
+    /// The rows the sheet opens with, read when the picker is asked for rather than inside the
+    /// sheet's content builder — that closure runs on every redraw, and a store query there is a
+    /// query every time SwiftUI feels like rebuilding.
+    @State private var pickerCandidates: [Candidate] = []
     /// The row whose sources popover is open, if any.
     @State private var showingSourcesFor: String?
     @State private var rerunning: Set<String> = []
+    /// The in-flight re-run per person, kept so leaving the screen can cancel them.
+    @State private var rerunTasks: [String: Task<Void, Never>] = [:]
     @State private var errorMessage: String?
 
     var body: some View {
@@ -49,16 +55,17 @@ struct ReviewView: View {
                 trailing(person)
             }
 
+            // A re-run in flight is about to rewrite one of these rows; moving on mid-write
+            // would extract from results the user never saw.
             PrimaryButton("Continue") { state.next() }
+                .disabled(!rerunning.isEmpty)
                 .padding(.vertical, 16)
         }
         .padding(.top, 24)
         .onAppear(perform: load)
+        .onDisappear(perform: cancelReruns)
         .sheet(item: $picking) { person in
-            CandidatePickerSheet(
-                person: person,
-                candidates: (try? model.store.candidates(personId: person.id)) ?? []
-            ) { _ in
+            CandidatePickerSheet(person: person, candidates: pickerCandidates) { _ in
                 picking = nil
                 load()
             }
@@ -112,7 +119,7 @@ struct ReviewView: View {
                 .help("Research again")
             }
 
-            Button { picking = person } label: {
+            Button { openPicker(for: person) } label: {
                 Image(systemName: "person.crop.circle.badge.questionmark")
             }
             .buttonStyle(.borderless)
@@ -196,8 +203,10 @@ struct ReviewView: View {
             }
             candidateCounts = counts
 
-            // Only ever a starting point: once the user has touched the checkboxes, their
-            // selection is the answer, including an empty one.
+            // The default, and it applies whenever the selection is empty — not only on the
+            // first load. This screen reloads after every pick and re-run, so a user who has
+            // unchecked everyone gets the default back at the next reload; any selection with
+            // something in it is left exactly as they left it.
             if state.selectedForExtract.isEmpty {
                 state.selectedForExtract = Set(selected.map(\.id).filter { best[$0] != nil })
             }
@@ -207,17 +216,31 @@ struct ReviewView: View {
         }
     }
 
+    private func openPicker(for person: Person) {
+        pickerCandidates = (try? model.store.candidates(personId: person.id)) ?? []
+        picking = person
+    }
+
     /// Researches one person again with a scanner of their own, so it can't collide with the
-    /// wizard's run, which has long since finished by the time this screen is up.
+    /// wizard's run, which has long since finished by the time this screen is up. The task is
+    /// kept so leaving the screen stops waiting on it.
     private func rerun(_ person: Person) {
-        guard !rerunning.contains(person.id) else { return }
-        rerunning.insert(person.id)
-        let scanner = model.makeScanner()
         let personId = person.id
-        Task {
+        guard rerunTasks[personId] == nil else { return }
+        rerunning.insert(personId)
+        let scanner = model.makeScanner()
+        rerunTasks[personId] = Task {
             for await _ in await scanner.run(personIds: [personId]) {}
+            rerunTasks[personId] = nil
             rerunning.remove(personId)
+            guard !Task.isCancelled else { return }
             load()
         }
+    }
+
+    private func cancelReruns() {
+        for task in rerunTasks.values { task.cancel() }
+        rerunTasks = [:]
+        rerunning = []
     }
 }
