@@ -21,11 +21,14 @@ public enum NameMatcher {
         "mohammed": ["mo", "mohamed", "muhammad"],
     ]
 
-    /// variant -> canonical, built once from `nicknames`.
+    /// variant -> canonical, built once from `nicknames`. Iterates canonical keys in sorted
+    /// order so that when a variant (e.g. "alex") is claimed by more than one canonical
+    /// ("alexander" and "alexandra"), the winner is deterministic across runs rather than
+    /// depending on Dictionary's unspecified iteration order.
     private static let variantToCanonical: [String: String] = {
         var map: [String: String] = [:]
-        for (canonical, variants) in nicknames {
-            for variant in variants {
+        for canonical in nicknames.keys.sorted() {
+            for variant in nicknames[canonical] ?? [] {
                 map[variant] = canonical
             }
         }
@@ -37,7 +40,10 @@ public enum NameMatcher {
 
     /// Lowercases, folds diacritics, turns punctuation into spaces, and collapses whitespace.
     public static func normalize(_ s: String) -> String {
-        let folded = s.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+        // Fixed POSIX locale: casing/diacritic folding must be identical on every device
+        // regardless of the user's system locale, since normalized names are compared and
+        // persisted, not just displayed.
+        let folded = s.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "en_US_POSIX"))
         var result = ""
         result.reserveCapacity(folded.count)
         var lastWasSpace = false
@@ -112,28 +118,34 @@ public enum NameMatcher {
         return jaro + Double(prefix) * scale * (1.0 - jaro)
     }
 
-    /// Set-based token overlap ratio, gated on the person's family-name token (its last token)
-    /// also appearing among the candidate's tokens — order-independent, so a reordered name
-    /// ("Ahmed Sara" for person "Sara Ahmed") still counts as a match.
+    /// Set-based token overlap ratio, gated on EVERY significant token of the person's name
+    /// (length >= 2, excluding ignored tokens like "abu") appearing somewhere in the
+    /// candidate's token set — order-independent, so a reordered name ("Ahmed Sara" for person
+    /// "Sara Ahmed") still counts as a match, and a candidate that merely shares one token with
+    /// the person's name (e.g. just the family name) does not.
     private static func tokenSetRatio(person: String, candidate: String) -> Double {
         let personTokens = tokens(person)
         let candidateTokens = tokens(candidate)
-        guard let familyToken = personTokens.last else { return 0.0 }
         let tb = Set(candidateTokens)
-        guard tb.contains(familyToken) else { return 0.0 }
+
+        let gatingTokens = personTokens.filter { $0.count >= 2 && !ignoredTokens.contains($0) }
+        guard !gatingTokens.isEmpty, gatingTokens.allSatisfy({ tb.contains($0) }) else { return 0.0 }
 
         let ta = Set(personTokens)
         return Double(ta.intersection(tb).count) / Double(max(1, min(ta.count, tb.count)))
     }
 
-    /// Expands every token to its nickname-canonical form (ignoring tokens like "abu"),
-    /// then runs Jaro-Winkler on the rejoined, sorted-token strings so token order doesn't matter.
+    /// Expands every token to its nickname-canonical form (ignoring tokens like "abu"), then
+    /// runs Jaro-Winkler on the rejoined strings, preserving each name's own token order.
+    /// (Token order independence is the token-set path's job, not this one's: sorting tokens
+    /// here before joining would let any two names that merely share a single token — e.g. both
+    /// containing "ahmed" — produce a large spurious common prefix once that shared token sorts
+    /// to the front on both sides, inflating the score even when the rest of the name differs.)
     private static func nicknameExpandedSimilarity(_ a: String, _ b: String) -> Double {
         func canonicalize(_ normalized: String) -> String {
             tokens(normalized)
                 .filter { !ignoredTokens.contains($0) }
                 .map(canonicalToken)
-                .sorted()
                 .joined(separator: " ")
         }
         let ca = canonicalize(a)
@@ -143,8 +155,9 @@ public enum NameMatcher {
     }
 
     /// The similarity between a contact's name and a candidate name found elsewhere, as the
-    /// max of three signals: whole-name Jaro-Winkler, token-set overlap (family name gated),
-    /// and Jaro-Winkler after nickname canonicalisation (also order-independent).
+    /// max of three signals: whole-name Jaro-Winkler, token-set overlap (gated on every
+    /// significant person-name token appearing in the candidate), and Jaro-Winkler after
+    /// nickname canonicalisation (also order-independent).
     public static func similarity(personName: String, candidateName: String) -> Double {
         let a = normalize(personName)
         let b = normalize(candidateName)

@@ -18,6 +18,18 @@ import Testing
     #expect(!NameMatcher.containsName("About Sara, growth lead", personName: "Sara Ahmed"))
 }
 
+@Test func nameSimilarityFixRound1() {
+    // Token-set gate: applies only when EVERY significant person-name token is present in the
+    // candidate's tokens, not just the last one.
+    #expect(NameMatcher.similarity(personName: "Ahmed Ali", candidateName: "Ali Ahmed Khan") >= NameMatcher.gate)
+    #expect(NameMatcher.similarity(personName: "Sara Ahmed", candidateName: "Ahmed Khan") < NameMatcher.gate)
+
+    // "alex" is claimed by both "alexander" and "alexandra" in the nickname table; resolution
+    // must be deterministic and applied to both names, so either full form still matches.
+    #expect(NameMatcher.similarity(personName: "Alex Smith", candidateName: "Alexandra Smith") >= NameMatcher.gate)
+    #expect(NameMatcher.similarity(personName: "Alex Smith", candidateName: "Alexander Smith") >= NameMatcher.gate)
+}
+
 @Test func usernameDerivation() {
     let u = UsernameDeriver.candidates(givenName: "Sara", familyName: "Ahmed",
         emails: ["sara.ahmed+news@acme.com", "info@acme.com"], urls: ["https://github.com/sahmed", "https://x.com/SaraA"])
