@@ -31,6 +31,10 @@ struct EvidenceChip: View {
         case .username: "at"
         case .avatar: "photo"
         case .conflict: "exclamationmark.triangle"
+        case .selfLink: "link.badge.plus"
+        case .selfName: "person.text.rectangle"
+        case .signatureTitle: "signature"
+        case .honorific: "graduationcap"
         }
     }
 
