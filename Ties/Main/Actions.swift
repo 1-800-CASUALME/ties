@@ -39,7 +39,7 @@ enum Actions {
             lines.append("TITLE:\(escape(jobTitle))")
         }
         for channel in channels {
-            let label = channel.label.map { ";TYPE=\(escape($0))" } ?? ""
+            let label = typeParameter(channel.label)
             switch channel.kind {
             case .phone: lines.append("TEL\(label):\(escape(channel.value))")
             case .email: lines.append("EMAIL;TYPE=INTERNET\(label):\(escape(channel.value))")
@@ -55,7 +55,8 @@ enum Actions {
         }
         lines.append("END:VCARD")
 
-        return VCardFile(fileName: fileName(for: person), text: lines.joined(separator: "\r\n") + "\r\n")
+        let text = lines.map(fold).joined(separator: "\r\n") + "\r\n"
+        return VCardFile(fileName: fileName(for: person), text: text)
     }
 
     // MARK: - Helpers
@@ -76,13 +77,53 @@ enum Actions {
     }
 
     /// RFC 6350 text escaping: backslashes, commas, semicolons, and newlines all carry meaning
-    /// inside a property value and have to be spelled out.
+    /// inside a property value and have to be spelled out. A bare carriage return is dropped
+    /// rather than escaped — the only line break the format has is `\n`, and a stray `\r` left
+    /// in the value would end the property line early.
     private static func escape(_ text: String) -> String {
         text
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\n", with: "\\n")
             .replacingOccurrences(of: ",", with: "\\,")
             .replacingOccurrences(of: ";", with: "\\;")
+    }
+
+    /// A `TYPE` parameter for a channel's label. Parameter values are a restricted token, not
+    /// free text, so the label is reduced to its letters and digits: escaping it the way a value
+    /// is escaped produces a parameter some readers reject outright.
+    private static func typeParameter(_ label: String?) -> String {
+        guard let label else { return "" }
+        let token = label.filter { $0.isLetter || $0.isNumber }
+        return token.isEmpty ? "" : ";TYPE=\(token)"
+    }
+
+    /// RFC 6350 §3.2 line folding: no line may be longer than 75 octets, and each continuation
+    /// begins with a single space that the reader strips again. The limit counts bytes, so a
+    /// name in a non-Latin script folds sooner than its character count suggests — but a
+    /// multi-byte character is never split down the middle.
+    private static func fold(_ line: String) -> String {
+        var folded: [String] = []
+        var current = ""
+        var octets = 0
+        // The first line may use all 75; a continuation spends one on its leading space.
+        var limit = 75
+
+        for character in line {
+            let width = String(character).utf8.count
+            if octets + width > limit {
+                folded.append(current)
+                current = ""
+                octets = 0
+                limit = 74
+            }
+            current.append(character)
+            octets += width
+        }
+        folded.append(current)
+
+        return folded.joined(separator: "\r\n ")
     }
 
     private static func fileName(for person: Person) -> String {

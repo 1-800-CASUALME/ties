@@ -45,7 +45,20 @@ struct PersonDetailView: View {
         }
         .safeAreaInset(edge: .bottom) { bottomBar }
         .onAppear(perform: load)
-        .onDisappear { noteTask?.cancel() }
+        // Leaving is the last chance to keep what was typed: the debounce hasn't fired yet, and
+        // this view is rebuilt per person (`.id`), so cancelling it without writing would throw
+        // the note away on every switch, window close and quit.
+        .onDisappear {
+            flushNote(personId: person.id)
+            cancelRefresh()
+        }
+        // Belt and braces for a caller that stops keying this view by person: the same flush,
+        // to the person whose note is actually in the editor.
+        .onChange(of: person.id) { previousId, _ in
+            flushNote(personId: previousId)
+            cancelRefresh()
+            load()
+        }
         .onChange(of: model.refreshRequest) { refresh() }
         .sheet(isPresented: $editing) {
             PersonEditView(person: person) { _ in
@@ -340,6 +353,10 @@ struct PersonDetailView: View {
     /// Writes the note half a second after the last keystroke. A `TextEditor` fires on every
     /// character and the note lives in the same table the search index is rebuilt from, so
     /// saving each one would rewrite the FTS row dozens of times per sentence.
+    ///
+    /// A debounce that only ever waits can also never save: someone who types without pausing
+    /// and then closes the window keeps restarting the timer. `flushNote` is the answer to
+    /// that, and every way out of this screen goes through it.
     private func scheduleNoteSave(_ text: String) {
         guard text != savedNote else { return }
         noteTask?.cancel()
@@ -347,13 +364,27 @@ struct PersonDetailView: View {
         noteTask = Task {
             try? await Task.sleep(for: .milliseconds(500))
             guard !Task.isCancelled else { return }
-            do {
-                try model.store.upsertNote(Note(personId: personId, body: text))
-                savedNote = text
-                errorMessage = nil
-            } catch {
-                errorMessage = error.localizedDescription
-            }
+            writeNote(text, personId: personId)
+        }
+    }
+
+    /// Writes a pending note right now and drops the debounce that was going to. Synchronous on
+    /// purpose: the callers are leaving — the view is disappearing, or is about to be reloaded
+    /// out from under the editor — and there is no later for an async write to happen in.
+    private func flushNote(personId: String) {
+        noteTask?.cancel()
+        noteTask = nil
+        guard note != savedNote else { return }
+        writeNote(note, personId: personId)
+    }
+
+    private func writeNote(_ text: String, personId: String) {
+        do {
+            try model.store.upsertNote(Note(personId: personId, body: text))
+            savedNote = text
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
         }
     }
 
@@ -400,7 +431,11 @@ struct PersonDetailView: View {
 
     // MARK: - Loading and refreshing
 
+    /// Re-reads everything this screen shows. Anything still in the note editor is written
+    /// first: a reload triggered by a refresh or an edit would otherwise replace unsaved text
+    /// with the older copy the store still has.
     private func load() {
+        flushNote(personId: person.id)
         do {
             channels = try model.store.channels(personId: person.id)
             profile = try model.store.profile(personId: person.id)
@@ -427,27 +462,49 @@ struct PersonDetailView: View {
 
         let scanner = model.makeScanner()
         let personId = person.id
-        refreshTask = Task {
+        refreshTask = model.track {
             for await event in await scanner.run(personIds: [personId]) {
+                guard !Task.isCancelled else {
+                    await scanner.cancel()
+                    break
+                }
                 progress = event
             }
+
             guard !Task.isCancelled else {
                 refreshing = false
+                progress = nil
                 return
             }
+
             do {
                 let extractor = try model.makeExtractor()
                 for await event in await extractor.run(personIds: [personId]) {
+                    guard !Task.isCancelled else {
+                        await extractor.cancel()
+                        break
+                    }
                     progress = event
                 }
             } catch {
                 errorMessage = error.localizedDescription
             }
+
             refreshing = false
             progress = nil
+            guard !Task.isCancelled else { return }
             load()
             onChanged()
         }
+    }
+
+    /// Abandons a refresh whose answer has stopped mattering — the screen is going away, or is
+    /// about to be about somebody else.
+    private func cancelRefresh() {
+        refreshTask?.cancel()
+        refreshTask = nil
+        refreshing = false
+        progress = nil
     }
 }
 

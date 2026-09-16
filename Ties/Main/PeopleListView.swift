@@ -25,6 +25,11 @@ struct PeopleListView: View {
     @State private var searching = false
     /// The in-flight `ask`, held so each new query can cancel the last rather than racing it.
     @State private var askTask: Task<Void, Never>?
+    /// Bumped by every query. A run that comes back to find the number has moved on is a run
+    /// nobody is waiting for any more, and must not touch the results or the spinner —
+    /// cancellation alone doesn't cover it, because a run that has already finished its `ask`
+    /// can't be cancelled out of writing what it found.
+    @State private var askGeneration = 0
     @State private var errorMessage: String?
 
     private enum Mode {
@@ -45,7 +50,7 @@ struct PeopleListView: View {
         .animation(.snappy, value: results)
         .navigationSplitViewColumnWidth(min: 280, ideal: 340)
         .searchable(text: $query, placement: .toolbar, prompt: "Search or ask…")
-        .onSubmit(of: .search) { runAsk() }
+        .onSubmit(of: .search) { runAsk(debounced: false) }
         .onChange(of: query) { _, text in queryChanged(text) }
         .safeAreaInset(edge: .bottom) { bottomBar }
     }
@@ -163,25 +168,34 @@ struct PeopleListView: View {
 
     private func queryChanged(_ text: String) {
         if text.hasPrefix("?") {
-            runAsk()
+            runAsk(debounced: true)
             return
         }
         // Back to filtering: drop the answer and the run that was producing it.
         askTask?.cancel()
         askTask = nil
+        askGeneration += 1
         searching = false
         submitted = false
         results = []
         errorMessage = nil
     }
 
-    private func runAsk() {
+    /// Answers the current query. Typing past a `?` waits out a pause first — every keystroke
+    /// would otherwise start a fused keyword-and-embedding search over the whole store, and the
+    /// answer to half a word is worth nothing. Return means the user has finished typing and
+    /// runs immediately.
+    private func runAsk(debounced: Bool) {
         askTask?.cancel()
+        askGeneration += 1
+        let generation = askGeneration
 
-        var text = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        if text.hasPrefix("?") { text.removeFirst() }
-        text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        var trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("?") { trimmed.removeFirst() }
+        let text = trimmed.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else {
+            askTask = nil
+            searching = false
             results = []
             errorMessage = nil
             return
@@ -191,18 +205,24 @@ struct PeopleListView: View {
         searching = true
         errorMessage = nil
         let search = model.search
-        askTask = Task {
+        askTask = model.track {
+            if debounced {
+                try? await Task.sleep(for: .milliseconds(350))
+                guard !Task.isCancelled, generation == askGeneration else { return }
+            }
             do {
                 let hits = try await search.ask(text, limit: 50)
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, generation == askGeneration else { return }
                 results = hits
                 errorMessage = nil
             } catch {
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, generation == askGeneration else { return }
                 results = []
                 errorMessage = error.localizedDescription
             }
-            searching = false
+            // Only the newest run owns the spinner; an older one turning it off would hide a
+            // search that is still going.
+            if generation == askGeneration { searching = false }
         }
     }
 

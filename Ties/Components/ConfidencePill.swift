@@ -3,9 +3,11 @@ import TiesCore
 
 /// How sure the research is that a candidate really is this person, as a small tinted capsule.
 ///
-/// The cut-offs are the scorer's own (`ScoringWeights.default`) rather than numbers typed in
-/// here, so the pill can never disagree with the scan that set the status. A status the user
-/// has settled — an accepted candidate — outranks the score entirely.
+/// Status is the only thing it reads. The scorer already turned the score into a status using
+/// its own thresholds, and the user can overrule that by accepting or rejecting a candidate; a
+/// pill that looked at the number again could disagree with the decision the rest of the app has
+/// already acted on — a rejected candidate reading "High", or an accepted one reading "Unsure".
+/// The score is still worth seeing, so it is the tooltip.
 struct ConfidencePill: View {
     let score: Double
     let status: Candidate.Status
@@ -17,39 +19,29 @@ struct ConfidencePill: View {
             .padding(.horizontal, 8)
             .padding(.vertical, 3)
             .background(Capsule().fill(tint.opacity(0.15)))
+            .help("Match score \(formattedScore)")
             .accessibilityLabel("Confidence: \(label)")
-    }
-
-    private enum Level {
-        case chosen, rejected, high, unsure, none
-    }
-
-    private var level: Level {
-        let weights = ScoringWeights.default
-        if status == .accepted { return .chosen }
-        // Ruled out, by the user or by accepting one of its siblings. However well it scored,
-        // it is not this person, and a green "High" next to it would be a lie.
-        if status == .rejected { return .rejected }
-        if status == .auto || score >= weights.autoThreshold { return .high }
-        if score >= weights.pendingThreshold { return .unsure }
-        return .none
+            .accessibilityValue("Match score \(formattedScore)")
     }
 
     private var label: String {
-        switch level {
-        case .chosen: "Chosen"
+        switch status {
+        case .accepted: "Chosen"
+        case .auto: "High"
+        case .pending: "Unsure"
         case .rejected: "No"
-        case .high: "High"
-        case .unsure: "Unsure"
-        case .none: "None"
         }
     }
 
     private var tint: Color {
-        switch level {
-        case .chosen, .high: .green
-        case .unsure: .orange
-        case .rejected, .none: .gray
+        switch status {
+        case .accepted, .auto: .green
+        case .pending: .orange
+        case .rejected: .gray
         }
+    }
+
+    private var formattedScore: String {
+        score.formatted(.number.precision(.fractionLength(2)))
     }
 }

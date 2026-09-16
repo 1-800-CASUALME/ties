@@ -27,6 +27,16 @@ struct PersonEditView: View {
     @State private var summary = ""
     @State private var canHelpWith = ""
     @State private var errorMessage: String?
+    /// True when the form couldn't be filled in from the store. Saving then would write a blank
+    /// name and no channels over a person whose real details we simply failed to read.
+    @State private var loadFailed = false
+
+    /// The three profile fields as they were loaded. Save compares against them so editing only
+    /// a phone number leaves a researched profile's `providerId` and confidence alone — the
+    /// research wrote those, and correcting a typo in a phone number doesn't unwrite it.
+    @State private var loadedOccupation = ""
+    @State private var loadedSummary = ""
+    @State private var loadedCanHelpWith = ""
 
     /// One editable contact row. Identified by a `UUID` of its own rather than by its value, so
     /// two blank rows (or two identical numbers) stay separate rows while being typed into.
@@ -111,6 +121,7 @@ struct PersonEditView: View {
                     .keyboardShortcut(.cancelAction)
                 Button("Save", action: save)
                     .keyboardShortcut(.defaultAction)
+                    .disabled(loadFailed)
             }
             .padding(16)
         }
@@ -128,6 +139,9 @@ struct PersonEditView: View {
 
     // MARK: - Loading
 
+    /// Fills the form in. A read that fails says so and blocks Save rather than presenting a
+    /// blank form that looks like a person with no details — saving that would be the one way
+    /// to turn a transient read error into real data loss.
     private func load() {
         guard let person else {
             rows = [ChannelRow()]
@@ -138,19 +152,32 @@ struct PersonEditView: View {
         organization = person.organization ?? ""
         jobTitle = person.jobTitle ?? ""
 
-        let stored = (try? model.store.channels(personId: person.id)) ?? []
-        rows = stored.map { ChannelRow(kind: $0.kind, label: $0.label ?? "", value: $0.value) }
-        if rows.isEmpty { rows = [ChannelRow()] }
+        do {
+            let stored = try model.store.channels(personId: person.id)
+            rows = stored.map { ChannelRow(kind: $0.kind, label: $0.label ?? "", value: $0.value) }
+            if rows.isEmpty { rows = [ChannelRow()] }
 
-        let facts = (try? model.store.profile(personId: person.id))?.facts
-        occupation = facts?.occupation ?? ""
-        summary = facts?.summary ?? ""
-        canHelpWith = (facts?.canHelpWith ?? []).joined(separator: ", ")
+            let facts = try model.store.profile(personId: person.id)?.facts
+            occupation = facts?.occupation ?? ""
+            summary = facts?.summary ?? ""
+            canHelpWith = (facts?.canHelpWith ?? []).joined(separator: ", ")
+            loadedOccupation = occupation
+            loadedSummary = summary
+            loadedCanHelpWith = canHelpWith
+
+            loadFailed = false
+            errorMessage = nil
+        } catch {
+            loadFailed = true
+            errorMessage = "Couldn't read \(person.displayName): \(error.localizedDescription)"
+        }
     }
 
     // MARK: - Saving
 
     private func save() {
+        guard !loadFailed else { return }
+
         let given = givenName.trimmingCharacters(in: .whitespacesAndNewlines)
         let family = familyName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !given.isEmpty || !family.isEmpty else {
@@ -192,12 +219,24 @@ struct PersonEditView: View {
         }
     }
 
+    /// Whether the user actually touched any of the three profile fields this form owns.
+    private var profileFieldsChanged: Bool {
+        occupation != loadedOccupation
+            || summary != loadedSummary
+            || canHelpWith != loadedCanHelpWith
+    }
+
     /// Writes the three profile fields this form owns, keeping whatever the research found in
     /// the ones it doesn't (companies, achievements, certificates, experience).
     ///
-    /// A person with nothing typed in any of them and no profile already gets none written: an
-    /// empty profile would put them under "Researched" having never been researched.
+    /// Writes nothing at all unless one of those three was edited. Saving a form where only a
+    /// phone number changed would otherwise restamp a researched profile as `"manual"` at full
+    /// confidence, throwing away the provenance of facts the user never touched. A person with
+    /// nothing typed and no profile already gets none written either: an empty profile would
+    /// put them under "Researched" having never been researched.
     private func saveProfile(for personId: String) throws {
+        guard profileFieldsChanged else { return }
+
         let existing = try model.store.profile(personId: personId)
         var facts = existing?.facts ?? .empty
         facts.occupation = trimmedOrNil(occupation)
@@ -209,29 +248,34 @@ struct PersonEditView: View {
 
         guard !facts.isEmpty || existing != nil else { return }
 
-        let profile = Profile(
-            personId: personId,
-            facts: facts,
-            confidence: 1,
-            providerId: "manual",
-            model: existing?.model,
-            embedding: existing?.embedding
+        try model.store.upsertProfile(
+            Profile(
+                personId: personId,
+                facts: facts,
+                confidence: 1,
+                providerId: "manual",
+                model: existing?.model,
+                embedding: existing?.embedding
+            )
         )
-        try model.store.upsertProfile(profile)
-        reembed(profile)
+        reembed(personId: personId, facts: facts)
     }
 
     /// Re-embeds the edited facts so semantic search answers with this person too. Deliberately
     /// not awaited: embedding takes long enough to be felt, the profile is already saved and
     /// keyword-searchable without it, and the stale vector it replaces is no worse than none.
-    private func reembed(_ profile: Profile) {
+    ///
+    /// Because it lands later, it re-reads the profile before writing and gives up if the facts
+    /// have moved on — another edit, or an extraction that finished in between. It only ever
+    /// changes `embedding`, so it can't undo whatever wrote the row it found.
+    private func reembed(personId: String, facts: ProfileFacts) {
         let embedder = model.embedder
         let store = model.store
-        Task {
-            guard let vector = try? await embedder.embed(profile.facts.searchableText) else { return }
-            var updated = profile
-            updated.embedding = vector
-            try? store.upsertProfile(updated)
+        Task.detached {
+            guard let vector = try? await embedder.embed(facts.searchableText) else { return }
+            guard var latest = try? store.profile(personId: personId), latest.facts == facts else { return }
+            latest.embedding = vector
+            try? store.upsertProfile(latest)
         }
     }
 

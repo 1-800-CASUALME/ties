@@ -53,9 +53,14 @@ final class AppModel {
 
     /// Where the setup wizard should open when it is shown again. `nil` starts it from the
     /// beginning, which is what a first run (or a wiped database) wants; Settings' "Add more
-    /// contacts…" sets it to `.select` so the wizard reopens at the contact picker instead.
+    /// contacts…" sets it to `.access` so the wizard reopens at the Contacts step instead.
     /// Deliberately not persisted: it describes one trip through setup, not a preference.
     var resumeWizardStep: WizardStep?
+
+    /// Long-running work a view has started — a refresh, a search — kept so something that
+    /// pulls the ground out from under all of it can stop it first. Not observed: registering
+    /// a task is bookkeeping, not a change any view draws.
+    @ObservationIgnored private var work: [UUID: Task<Void, Never>] = [:]
 
     private var setupCompleted: Bool
     private var providerId: String?
@@ -119,12 +124,42 @@ final class AppModel {
         }
     }
 
-    /// Re-enters setup at the contact picker, keeping everything already researched. Everyone
-    /// imported is already in the store, so the picker simply reopens with the ones that were
-    /// skipped the first time still unticked.
+    /// Re-enters setup at the Contacts step, keeping everything already researched. It starts
+    /// there rather than at the picker because "more contacts" usually means people added to
+    /// the address book since the first run: `AccessView` re-reads the authorization status and
+    /// syncs again on Continue, so those arrive in the store before the picker lists them.
     func addMoreContacts() {
-        resumeWizardStep = .select
+        resumeWizardStep = .access
         hasCompletedSetup = false
+    }
+
+    // MARK: - Background work
+
+    /// Runs `operation` as a tracked task: it is cancelled along with everything else by
+    /// `cancelAllWork()`, and forgotten by itself once it finishes. The returned task is the
+    /// caller's to cancel on its own account (a view leaving the screen, a newer query
+    /// replacing an older one).
+    @discardableResult
+    func track(_ operation: @escaping @MainActor () async -> Void) -> Task<Void, Never> {
+        let token = UUID()
+        let task = Task { @MainActor in
+            await operation()
+            self.work[token] = nil
+        }
+        // The task can't have run yet — it is `@MainActor` and so are we — so this can never
+        // re-add one that has already finished and removed itself.
+        work[token] = task
+        return task
+    }
+
+    /// Stops every tracked task. Called before the database is emptied: a scan or a search that
+    /// outlives the rows it was reading would write results about people who no longer exist.
+    func cancelAllWork() {
+        let running = Array(work.values)
+        work.removeAll()
+        for task in running {
+            task.cancel()
+        }
     }
 
     // MARK: - Factories

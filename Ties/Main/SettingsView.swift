@@ -29,6 +29,10 @@ private struct GeneralSettingsView: View {
     @State private var message: String?
     @State private var updateStatus: UpdateStatus?
     @State private var checking = false
+    @State private var exporting = false
+    /// Read on appear and after anything that changes it, rather than per body pass: it stats a
+    /// file, and `body` runs on every keystroke anywhere in this window.
+    @State private var databaseSize: Int64 = 0
 
     private var databaseURL: URL { Store.defaultURL }
 
@@ -51,10 +55,15 @@ private struct GeneralSettingsView: View {
             }
 
             Section {
-                HStack {
+                HStack(spacing: 10) {
                     Button("Export JSON…", action: exportJSON)
+                        .disabled(exporting)
+                    if exporting {
+                        ProgressView().controlSize(.small)
+                    }
                     Spacer()
                     Button("Delete Everything", role: .destructive) { confirmingDelete = true }
+                        .disabled(exporting)
                 }
                 if let message {
                     Text(message)
@@ -85,6 +94,7 @@ private struct GeneralSettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .onAppear(perform: refreshSize)
         .confirmationDialog("Delete everything?", isPresented: $confirmingDelete) {
             Button("Delete Everything", role: .destructive, action: deleteEverything)
             Button("Cancel", role: .cancel) {}
@@ -116,32 +126,55 @@ private struct GeneralSettingsView: View {
     }
 
     private var formattedSize: String {
-        ByteCountFormatter.string(fromByteCount: model.store.databaseSizeBytes(), countStyle: .file)
+        ByteCountFormatter.string(fromByteCount: databaseSize, countStyle: .file)
     }
 
+    private func refreshSize() {
+        databaseSize = model.store.databaseSizeBytes()
+    }
+
+    /// Serializes every person and writes the file off the main actor: the export walks the
+    /// whole database and encodes it, which on a large one is long enough to freeze the window
+    /// if it happens where the window is drawn.
     private func exportJSON() {
         let panel = NSSavePanel()
         panel.nameFieldStringValue = "Ties.json"
         panel.allowedContentTypes = [.json]
         panel.canCreateDirectories = true
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        do {
-            try model.store.exportJSON().write(to: url)
-            message = "Exported to \(url.lastPathComponent)."
-        } catch {
-            message = error.localizedDescription
+
+        exporting = true
+        message = nil
+        let store = model.store
+        Task {
+            message = await Task.detached {
+                do {
+                    try store.exportJSON().write(to: url)
+                    return "Exported to \(url.lastPathComponent)."
+                } catch {
+                    return error.localizedDescription
+                }
+            }.value
+            exporting = false
+            refreshSize()
         }
     }
 
     /// Empties the database and drops the app back into setup — with nothing in it, the main
     /// window has nothing to show and the wizard is the only sensible screen.
+    ///
+    /// Everything still running is stopped first. A scan or a search started before this point
+    /// is reading rows that are about to go, and would otherwise finish by writing candidates,
+    /// profiles, or a note about people who no longer exist.
     private func deleteEverything() {
+        model.cancelAllWork()
         do {
             try model.store.deleteEverything()
             model.selectedPersonId = nil
             model.resumeWizardStep = nil
             model.hasCompletedSetup = false
             message = "Everything deleted."
+            refreshSize()
         } catch {
             message = error.localizedDescription
         }
