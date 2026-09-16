@@ -15,6 +15,10 @@ public struct ScoringWeights: Sendable {
     /// A link the person shared or signed with themselves — they pointed at this profile, so on
     /// its own it is enough to auto-accept.
     public var selfLink: Double
+    /// A shared link whose page never names the person and whose URL doesn't either: a link
+    /// forwarded rather than owned looks exactly like this, so it is worth surfacing for a human
+    /// to judge and not worth accepting unseen.
+    public var selfLinkUnverified: Double
     public var selfName: Double
     public var signatureTitle: Double
     public var honorific: Double
@@ -31,6 +35,7 @@ public struct ScoringWeights: Sendable {
         username: Double = 1.5,
         name: Double = 1.0,
         selfLink: Double = 6.0,
+        selfLinkUnverified: Double = 3.0,
         selfName: Double = 2.0,
         signatureTitle: Double = 2.0,
         honorific: Double = 1.0,
@@ -46,6 +51,7 @@ public struct ScoringWeights: Sendable {
         self.username = username
         self.name = name
         self.selfLink = selfLink
+        self.selfLinkUnverified = selfLinkUnverified
         self.selfName = selfName
         self.signatureTitle = signatureTitle
         self.honorific = honorific
@@ -104,32 +110,6 @@ public enum CandidateScorer {
         .emailHash, .selfLink, .phone, .company, .signatureTitle, .selfName, .location, .avatar, .username, .honorific, .name,
     ]
 
-    /// Honorific -> the profession words it implies, used both to credit a candidate whose
-    /// headline says what the honorific claims and to spot a headline that contradicts the
-    /// title in the person's mail signature.
-    // TODO(Task 6): switch to Honorifics.professions
-    private static let professionsByHonorific: [String: [String]] = [
-        "dr": ["doctor", "physician", "dentist", "phd", "md"],
-        "eng": ["engineer"],
-        "prof": ["professor"],
-        "capt": ["captain", "pilot"],
-        "adv": ["lawyer", "attorney", "advocate"],
-        "arch": ["architect"],
-    ]
-
-    /// Profession word -> the honorific it belongs to, so "Physician" and "Doctor" are read as
-    /// one profession rather than two contradicting ones. Built once, over sorted keys so a
-    /// word claimed by two honorifics resolves deterministically.
-    private static let honorificByProfession: [String: String] = {
-        var map: [String: String] = [:]
-        for honorific in professionsByHonorific.keys.sorted() {
-            for profession in professionsByHonorific[honorific] ?? [] {
-                map[profession] = honorific
-            }
-        }
-        return map
-    }()
-
     public static func score(groups: [[ProbeFinding]], input: ProbeInput, weights: ScoringWeights = .default) -> [ScoredCandidate] {
         // Pair each scored candidate with its original group index before sorting, so that
         // candidates tying on score keep a deterministic order (first-appearing group wins)
@@ -155,7 +135,13 @@ public enum CandidateScorer {
 
     private static func scoreGroup(_ group: [ProbeFinding], input: ProbeInput, weights: ScoringWeights) -> ScoredCandidate? {
         let selfLink = selfLinkMatch(group, input: input)
-        guard passesNameGate(group, input: input, hasSelfLink: selfLink != nil) else { return nil }
+        // The group names the person outright, by a name on a finding, a hashed identity, or a
+        // body text that mentions them.
+        let named = passesNameGate(group, input: input)
+        // A link they shared themselves reaches the review screen even when nothing on it names
+        // them — a personal landing page often doesn't — but only a corroborated one is believed
+        // outright further down.
+        guard named || selfLink != nil else { return nil }
 
         let candidateId = UUID().uuidString
 
@@ -163,6 +149,14 @@ public enum CandidateScorer {
         // every `.conflict` item is kept.
         var kept: [Evidence.Kind: EvidenceItem] = [:]
         var conflictItems: [EvidenceItem] = []
+        // Conflicts this scorer derives itself, each with a rank: only the strongest is kept, so
+        // three doubts about one candidate cost it -3 and not -9. Two derived conflicts used to
+        // be enough to push a candidate the probes had proved (emailHash, 8) below the pending
+        // threshold and out of the review screen altogether.
+        var derivedConflicts: [(rank: Int, item: EvidenceItem)] = []
+        // The evidence list re-weights every item by kind, so the one kind that can carry two
+        // weights says here which one it carried.
+        var weightOverride: [Evidence.Kind: Double] = [:]
         for finding in group {
             for item in finding.evidence {
                 if item.kind == .conflict {
@@ -209,7 +203,7 @@ public enum CandidateScorer {
                     kept[.company] = EvidenceItem(kind: .company, weight: weights.company, detail: "Company matches: \(groupCompany)", sourceURL: nil)
                 }
             } else if similarity < 0.5 {
-                conflictItems.append(EvidenceItem(kind: .conflict, weight: weights.conflict, detail: "Different company: \(groupCompany)", sourceURL: nil))
+                derivedConflicts.append((rank: 0, item: EvidenceItem(kind: .conflict, weight: weights.conflict, detail: "Different company: \(groupCompany)", sourceURL: nil)))
             }
         }
 
@@ -227,8 +221,22 @@ public enum CandidateScorer {
         }
 
         // Derived: the person pointed at this page themselves, in a message or a signature.
+        //
+        // Full weight only for a link something corroborates — the group names the person, or
+        // the URL itself does ("linkedin.com/in/sara-ahmed", which is the common case LinkedIn
+        // won't let anyone read). A link that names nobody is as likely to be one they forwarded
+        // as one they own, so it goes to the review screen rather than straight through.
         if kept[.selfLink] == nil, let selfLink {
-            kept[.selfLink] = EvidenceItem(kind: .selfLink, weight: weights.selfLink, detail: "They shared this link themselves", sourceURL: selfLink)
+            let corroborated = named || slugNamesPerson(selfLink, input: input)
+            if !corroborated {
+                weightOverride[.selfLink] = weights.selfLinkUnverified
+            }
+            kept[.selfLink] = EvidenceItem(
+                kind: .selfLink,
+                weight: corroborated ? weights.selfLink : weights.selfLinkUnverified,
+                detail: corroborated ? "They shared this link themselves" : "They shared this link, but nothing on it names them",
+                sourceURL: selfLink
+            )
         }
 
         // Derived: the candidate goes by a name the person actually answers to — or by one that
@@ -237,17 +245,18 @@ public enum CandidateScorer {
             if kept[.selfName] == nil, let alias = matchingAlias(displayName, input: input) {
                 kept[.selfName] = EvidenceItem(kind: .selfName, weight: weights.selfName, detail: "Known as \(alias)", sourceURL: nil)
             } else if kept[.selfName] == nil, let alias = conflictingAlias(displayName, input: input) {
-                conflictItems.append(EvidenceItem(kind: .conflict, weight: weights.conflict, detail: "Known as \(alias), not \(displayName)", sourceURL: nil))
+                derivedConflicts.append((rank: 2, item: EvidenceItem(kind: .conflict, weight: weights.conflict, detail: "Known as \(alias), not \(displayName)", sourceURL: nil)))
             }
         }
 
         // Derived: the headline says what their mail signature says — or says a different
-        // profession outright.
+        // profession outright. A candidate whose headline already agrees with one title can't
+        // also contradict another: people hold more than one title at a time.
         if let headline {
             if kept[.signatureTitle] == nil, let title = input.titles.first(where: { titleMatches(headline, title: $0) }) {
                 kept[.signatureTitle] = EvidenceItem(kind: .signatureTitle, weight: weights.signatureTitle, detail: "Signature title matches: \(title)", sourceURL: nil)
-            } else if let clash = professionConflict(headline: headline, input: input) {
-                conflictItems.append(EvidenceItem(kind: .conflict, weight: weights.conflict, detail: "Signature says \(clash.theirs), the page says \(clash.page)", sourceURL: nil))
+            } else if kept[.signatureTitle] == nil, let clash = professionConflict(headline: headline, input: input) {
+                derivedConflicts.append((rank: 1, item: EvidenceItem(kind: .conflict, weight: weights.conflict, detail: "Signature says \(clash.theirs), the page says \(clash.page)", sourceURL: nil)))
             }
         }
 
@@ -262,10 +271,18 @@ public enum CandidateScorer {
             kept[.location] = EvidenceItem(kind: .location, weight: weights.location, detail: "Location matches: \(location)", sourceURL: nil)
         }
 
+        // Only the strongest derived conflict is kept — the candidate's employer contradicting
+        // the one we know, then its headline contradicting their signature, then their push name
+        // being somebody else's — so the doubt costs one conflict's weight however many ways it
+        // shows. Conflicts a probe reported are kept as they came.
+        if let strongest = derivedConflicts.min(by: { $0.rank < $1.rank })?.item {
+            conflictItems.append(strongest)
+        }
+
         var evidence: [Evidence] = []
         for kind in dedupedKindOrder {
             guard let item = kept[kind] else { continue }
-            evidence.append(Evidence(candidateId: candidateId, kind: kind, weight: weights.weight(for: kind), detail: item.detail, sourceURL: item.sourceURL))
+            evidence.append(Evidence(candidateId: candidateId, kind: kind, weight: weightOverride[kind] ?? weights.weight(for: kind), detail: item.detail, sourceURL: item.sourceURL))
         }
         for item in conflictItems {
             evidence.append(Evidence(candidateId: candidateId, kind: .conflict, weight: weights.conflict, detail: item.detail, sourceURL: item.sourceURL))
@@ -310,15 +327,10 @@ public enum CandidateScorer {
     }
 
     /// Passes when any finding's `displayName` is a plausible match for any name the contact
-    /// goes by (the one in Contacts or an alias the local signals collected), or the group is a
-    /// link the person shared themselves, or any finding carries `.emailHash` evidence (a
-    /// hashed-identity match is proof enough on its own), or any finding's body text mentions
-    /// the contact's name.
-    private static func passesNameGate(_ group: [ProbeFinding], input: ProbeInput, hasSelfLink: Bool) -> Bool {
-        // They pointed at this page themselves, so it identifies them whether or not it repeats
-        // their name — a personal site's landing page often doesn't.
-        if hasSelfLink { return true }
-
+    /// goes by (the one in Contacts or an alias the local signals collected), or any finding
+    /// carries `.emailHash` evidence (a hashed-identity match is proof enough on its own), or any
+    /// finding's body text mentions the contact's name.
+    private static func passesNameGate(_ group: [ProbeFinding], input: ProbeInput) -> Bool {
         let names = input.aliases
         let nameMatches = group.contains { finding in
             guard let name = finding.displayName else { return false }
@@ -347,6 +359,28 @@ public enum CandidateScorer {
             if let linked = finding.linkedURLs.first(where: { shared.contains(canonicalLink($0)) }) { return linked }
         }
         return nil
+    }
+
+    /// True when the link's own text spells out a name the person goes by: "linkedin.com/in/
+    /// sara-ahmed" or "saraahmed.dev" for Sara Ahmed. Host and path are folded together with
+    /// every separator removed, so a slug spelled with hyphens, dots or nothing at all reads the
+    /// same, and the name has to appear whole — a single given name is far too common in a URL
+    /// to mean anything on its own.
+    private static func slugNamesPerson(_ url: String, input: ProbeInput) -> Bool {
+        let components = URLComponents(string: url)
+        let slug = joinedTokens((components?.host ?? "") + " " + (components?.path ?? ""))
+        guard !slug.isEmpty else { return false }
+
+        return input.aliases.contains { alias in
+            let aliasTokens = tokens(alias)
+            guard aliasTokens.count >= 2 else { return false }
+            return slug.contains(aliasTokens.joined())
+        }
+    }
+
+    /// The normalized words of a string run together, so separators stop mattering.
+    private static func joinedTokens(_ s: String) -> String {
+        tokens(s).joined()
     }
 
     /// `ProbeFinding.canonical` with a bare trailing slash dropped as well, so "https://sara.dev"
@@ -379,6 +413,11 @@ public enum CandidateScorer {
     /// Ray" and "Sara Ahmed" at 0.53, because "Bob" becomes "Robert".)
     private static func conflictingAlias(_ displayName: String, input: ProbeInput) -> String? {
         guard let aliases = input.signals?.aliases else { return nil }
+        // A push name is a fact about the handle, not about this candidate. When the candidate is
+        // named the way Contacts names the person, the push name is somebody else sharing the
+        // phone — an Arabic kunya ("Abu Khalid") is often not even a different person — and the
+        // candidate must not lose a hashed-identity match over it.
+        guard NameMatcher.similarity(personName: input.fullName, candidateName: displayName) < NameMatcher.gate else { return nil }
         let candidateTokens = Set(tokens(displayName))
 
         return aliases.first { alias in
@@ -409,28 +448,31 @@ public enum CandidateScorer {
     }
 
     /// The professions a signature title and a candidate headline name when they are different
-    /// professions altogether — "Cardiologist, MD" against "Software Engineer". Only words in
-    /// `professionsByHonorific` count, and only their honorific families are compared, so
-    /// "Physician" against "Doctor" is one profession said twice rather than a contradiction,
-    /// and two titles the map has never heard of never conflict.
+    /// professions altogether — "Cardiologist, MD" against "Software Engineer". Only words
+    /// `Honorifics` knows count, and only their canonical families are compared, so "Physician"
+    /// against "Doctor" is one profession said twice rather than a contradiction, and two titles
+    /// the vocabulary has never heard of never conflict. Both words are returned as the text
+    /// wrote them, for a detail line that quotes rather than paraphrases.
     private static func professionConflict(headline: String, input: ProbeInput) -> (theirs: String, page: String)? {
         let page = professions(in: headline)
         let theirs = input.titles.flatMap { professions(in: $0) }
         guard let firstPage = page.first, let firstTheirs = theirs.first else { return nil }
-        guard Set(theirs.map(\.honorific)).isDisjoint(with: page.map(\.honorific)) else { return nil }
+        guard Set(theirs.map(\.family)).isDisjoint(with: page.map(\.family)) else { return nil }
         return (theirs: firstTheirs.word, page: firstPage.word)
     }
 
     /// The honorific the person is addressed by and the profession word the pages actually use,
-    /// when the two agree — "Dr" and a headline reading "Cardiologist, MD".
+    /// when the two agree — "دكتور" and a headline reading "Physician at Mayo Clinic". The page's
+    /// own spelling is returned, so the detail reads "the page says MD", not "md".
     private static func honorificMatch(in texts: [String], input: ProbeInput) -> (honorific: String, profession: String)? {
         guard let honorifics = input.signals?.honorifics, !honorifics.isEmpty, !texts.isEmpty else { return nil }
-        let words = Set(texts.flatMap(tokens))
+        let words = texts.flatMap(professionWords)
 
         for honorific in honorifics {
-            let implied = professionsByHonorific[canonicalHonorific(honorific)] ?? []
-            if let hit = implied.first(where: { words.contains($0) }) {
-                return (honorific: honorific, profession: hit)
+            guard let canonical = Honorifics.canonical(honorific) else { continue }
+            let implied = Set(Honorifics.professions(for: canonical))
+            if let hit = words.first(where: { implied.contains($0.normalized) }) {
+                return (honorific: honorific, profession: hit.word)
             }
         }
         return nil
@@ -438,18 +480,20 @@ public enum CandidateScorer {
 
     /// The profession words a piece of text uses, each with the honorific family it belongs to,
     /// in the order they appear.
-    private static func professions(in text: String) -> [(word: String, honorific: String)] {
-        tokens(text).compactMap { word in
-            honorificByProfession[word].map { (word: word, honorific: $0) }
+    private static func professions(in text: String) -> [(word: String, family: String)] {
+        professionWords(in: text).compactMap { hit in
+            Honorifics.canonical(hit.normalized).map { (word: hit.word, family: $0) }
         }
     }
 
-    /// An honorific reduced to the key `professionsByHonorific` uses: "Dr." and "DR" are both
-    /// "dr". Arabic spellings are left as written and so simply don't match, until this reads
-    /// the real vocabulary.
-    // TODO(Task 6): switch to Honorifics.professions
-    private static func canonicalHonorific(_ honorific: String) -> String {
-        honorific.lowercased().trimmingCharacters(in: .punctuationCharacters.union(.whitespaces))
+    /// The words of `text` that `Honorifics` knows as professions, each as the text spelled it
+    /// alongside its normalized form. The guard matters: `Honorifics.canonical` also answers for
+    /// the honorifics themselves, so without it a headline reading "Dr" would be read as naming
+    /// a profession rather than using a title.
+    private static func professionWords(in text: String) -> [(word: String, normalized: String)] {
+        text.split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+            .map { (word: String($0), normalized: NameMatcher.normalize(String($0))) }
+            .filter { Honorifics.allProfessions.contains($0.normalized) }
     }
 
     /// True when a candidate's location and the one the Mac already knows name the same place:

@@ -232,6 +232,14 @@ public actor Scanner {
             var errors: [String] = []
             var finishedStages: [String] = []
 
+            // The page probe can run twice for one person — once on the links they shared, once
+            // on the URLs on their contact card — and the progress line should say "their pages"
+            // once either way.
+            func finishStage(_ stage: String) {
+                guard !finishedStages.contains(stage) else { return }
+                finishedStages.append(stage)
+            }
+
             // A link the person shared or signed with themselves settles who they are, so it is
             // fetched directly rather than hoped for in a search result. In quick mode that
             // makes the web search redundant — the expensive probe skipped for the one case
@@ -239,13 +247,16 @@ public actor Scanner {
             let selfLinks = (signals?.links ?? []).filter(Scanner.isCandidateWorthy)
             let skipSearch = mode == .quick && !selfLinks.isEmpty
             if !selfLinks.isEmpty {
-                let pageProbe = probes.compactMap { $0 as? PageFetchProbe }.first ?? PageFetchProbe()
+                // The probe list's own page probe where there is one, so the run's page budget
+                // is the mode's either way.
+                let pageProbe = probes.compactMap { $0 as? PageFetchProbe }.first ?? PageFetchProbe(maxPages: mode.pagesFetched)
                 continuation?.yield(ScanProgress(
                     completed: completed, total: total, currentName: displayName, finished: false,
                     stage: pageProbe.displayName, finishedStages: finishedStages,
                     notice: skippedProbes.isEmpty ? nil : Scanner.searchSkippedNotice
                 ))
                 findings += await pageProbe.fetchDirect(urls: selfLinks, input: probeInput, client: client)
+                finishStage(pageProbe.displayName)
             }
 
             for probe in probes {
@@ -265,7 +276,7 @@ public actor Scanner {
                     let result = try await probe.run(probeInput, client: client)
                     findings.append(contentsOf: result)
                     challenges[probe.id] = 0
-                    finishedStages.append(probe.displayName)
+                    finishStage(probe.displayName)
                 } catch SearchBackendError.challenge {
                     challenges[probe.id, default: 0] += 1
                     if challenges[probe.id, default: 0] >= maxChallenges {
@@ -289,7 +300,7 @@ public actor Scanner {
                             let retryResult = try await probe.run(probeInput, client: client)
                             findings.append(contentsOf: retryResult)
                             challenges[probe.id] = 0
-                            finishedStages.append(probe.displayName)
+                            finishStage(probe.displayName)
                         } catch {
                             errors.append("\(probe.id): \(error)")
                             if case SearchBackendError.challenge = error {
@@ -307,7 +318,7 @@ public actor Scanner {
                         do {
                             let retryResult = try await probe.run(probeInput, client: client)
                             findings.append(contentsOf: retryResult)
-                            finishedStages.append(probe.displayName)
+                            finishStage(probe.displayName)
                         } catch {
                             errors.append("\(probe.id): \(error)")
                         }
