@@ -30,6 +30,8 @@ struct WizardWindow: View {
             AccessView()
         case .select:
             SelectView()
+        case .provider:
+            ProviderView()
         default:
             // Replaced screen by screen in the tasks that follow.
             Text(String(describing: state.step))
