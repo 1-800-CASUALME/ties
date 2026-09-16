@@ -12,22 +12,32 @@ public struct GitHubProbe: Probe {
     }
 
     public func run(_ input: ProbeInput, client: any HTTPClient) async throws -> [ProbeFinding] {
-        var findings: [ProbeFinding] = []
-        var resolvedLogins = Set<String>()
+        // Keyed by lowercased login so that when the direct-URL path and the commit-search
+        // path resolve the same account, the second path merges its evidence into the first
+        // path's finding instead of being discarded (or producing a duplicate finding).
+        var findingsByLogin: [String: ProbeFinding] = [:]
+        var order: [String] = []
+
+        func record(login: String, evidence: EvidenceItem) async throws {
+            let key = login.lowercased()
+            if var existing = findingsByLogin[key] {
+                existing.evidence.append(evidence)
+                findingsByLogin[key] = existing
+                return
+            }
+            guard let finding = try await fetchUser(login: login, client: client) else { return }
+            var withEvidence = finding
+            withEvidence.evidence = [evidence]
+            findingsByLogin[key] = withEvidence
+            order.append(key)
+        }
 
         for urlString in input.urls {
-            guard let login = Self.githubLogin(fromURL: urlString), !resolvedLogins.contains(login.lowercased()) else { continue }
-            if let finding = try await fetchUser(
+            guard let login = Self.githubLogin(fromURL: urlString) else { continue }
+            try await record(
                 login: login,
-                client: client,
-                evidenceKind: .username,
-                weight: 1.5,
-                detail: "GitHub profile linked from contact",
-                sourceURL: urlString
-            ) {
-                findings.append(finding)
-                resolvedLogins.insert(login.lowercased())
-            }
+                evidence: EvidenceItem(kind: .username, weight: 1.5, detail: "GitHub profile linked from contact", sourceURL: urlString)
+            )
         }
 
         for email in input.emails {
@@ -41,22 +51,15 @@ public struct GitHubProbe: Probe {
             }
 
             let search = try JSONDecoder().decode(CommitSearchResponse.self, from: response.body)
-            guard let login = search.items.first?.author?.login, !resolvedLogins.contains(login.lowercased()) else { continue }
+            guard let login = search.items.first?.author?.login else { continue }
 
-            if let finding = try await fetchUser(
+            try await record(
                 login: login,
-                client: client,
-                evidenceKind: .emailHash,
-                weight: 8,
-                detail: "GitHub commits signed with \(email)",
-                sourceURL: nil
-            ) {
-                findings.append(finding)
-                resolvedLogins.insert(login.lowercased())
-            }
+                evidence: EvidenceItem(kind: .emailHash, weight: 8, detail: "GitHub commits signed with \(email)", sourceURL: nil)
+            )
         }
 
-        return findings
+        return order.compactMap { findingsByLogin[$0] }
     }
 
     private func headers() -> [String: String] {
@@ -67,14 +70,9 @@ public struct GitHubProbe: Probe {
         return headers
     }
 
-    private func fetchUser(
-        login: String,
-        client: any HTTPClient,
-        evidenceKind: Evidence.Kind,
-        weight: Double,
-        detail: String,
-        sourceURL: String?
-    ) async throws -> ProbeFinding? {
+    /// Fetches the GitHub profile for `login`. Carries no evidence of its own — the caller
+    /// attaches whichever evidence led it here.
+    private func fetchUser(login: String, client: any HTTPClient) async throws -> ProbeFinding? {
         guard let userURL = URL(string: "https://api.github.com/users/\(login)") else { return nil }
 
         let response: HTTPResponse
@@ -99,7 +97,7 @@ public struct GitHubProbe: Probe {
             username: user.login,
             snippet: user.bio,
             pageKind: .github,
-            evidence: [EvidenceItem(kind: evidenceKind, weight: weight, detail: detail, sourceURL: sourceURL)]
+            evidence: []
         )
     }
 

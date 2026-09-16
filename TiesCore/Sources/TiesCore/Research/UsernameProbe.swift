@@ -87,16 +87,31 @@ public struct UsernameProbe: Probe {
 
             let doc = try SwiftSoup.parse(body)
             let title = try doc.title()
-            guard !title.isEmpty else { return nil }
 
-            let candidateName = titleBeforeSeparator(title)
-            guard NameMatcher.similarity(personName: personName, candidateName: candidateName) >= NameMatcher.gate else { return nil }
+            let candidateName: String?
+            let matched: Bool
+            if !title.isEmpty {
+                let name = titleBeforeSeparator(title)
+                candidateName = name
+                matched = NameMatcher.similarity(personName: personName, candidateName: name) >= NameMatcher.gate
+            } else {
+                // JSON-API style checks (e.g. GitHub's /users/{account}, Docker Hub's
+                // /v2/users/ endpoint) have no <title>. Fall back to checking whether the
+                // body mentions the person's name — first stripping the queried username
+                // itself, so an API that merely echoes the account back (e.g. a "login"
+                // field) doesn't trivially satisfy the check regardless of who actually
+                // owns the account.
+                candidateName = nil
+                let bodyWithoutUsername = body.replacingOccurrences(of: username, with: "", options: .caseInsensitive)
+                matched = NameMatcher.containsName(bodyWithoutUsername, personName: personName)
+            }
+            guard matched else { return nil }
 
             return ProbeFinding(
                 url: ProbeFinding.canonical(urlString),
                 displayName: candidateName,
                 username: username,
-                pageTitle: title,
+                pageTitle: title.isEmpty ? nil : title,
                 pageKind: .username,
                 evidence: [
                     EvidenceItem(

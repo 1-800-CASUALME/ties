@@ -29,6 +29,18 @@ import Foundation
     #expect(f.first?.evidence.contains { $0.kind == .emailHash } == true)
 }
 
+@Test func githubProbeMergesEvidenceWhenBothPathsResolveSameLogin() async throws {
+    let http = FakeHTTP()
+    http.routes = [("search/commits", 200, try fixture("github-commits", "json")), ("users/torvalds", 200, try fixture("github-user", "json"))]
+    let f = try await GitHubProbe().run(
+        input(name: ("Linus", "Torvalds"), emails: ["torvalds@linux-foundation.org"], urls: ["https://github.com/torvalds"]),
+        client: http
+    )
+    #expect(f.count == 1)
+    #expect(f[0].evidence.contains { $0.kind == .username })
+    #expect(f[0].evidence.contains { $0.kind == .emailHash })
+}
+
 @Test func wmnDatasetLoadsAndFilters() throws {
     let d = try WMNDataset.bundled()
     #expect(d.sites.count > 500)
@@ -48,6 +60,23 @@ import Foundation
     #expect(f[0].url == "https://dribbble.com/sara.ahmed")
     #expect(f[0].username == "sara.ahmed")
     #expect(f[0].evidence.contains { $0.kind == .username })
+}
+
+@Test func usernameProbeAcceptsJSONHitWithNoTitleWhenBodyMatchesName() async throws {
+    let site = WMNSite(name: "API Example", uriCheck: "https://api.example.com/users/{account}", eCode: 200, eString: "login", mString: nil, mCode: nil, cat: "tech")
+    let http = FakeHTTP()
+    http.routes = [("api.example.com/users/sara.ahmed", 200, Data(#"{"login":"sara.ahmed","name":"Sara Ahmed"}"#.utf8))]
+    let f = try await UsernameProbe(dataset: WMNDataset(sites: [site])).run(input(name: ("Sara", "Ahmed"), emails: ["sara.ahmed@x.com"]), client: http)
+    #expect(f.count == 1)
+    #expect(f[0].username == "sara.ahmed")
+}
+
+@Test func usernameProbeRejectsJSONHitWithNoTitleWhenBodyNameDiffers() async throws {
+    let site = WMNSite(name: "API Example", uriCheck: "https://api.example.com/users/{account}", eCode: 200, eString: "login", mString: nil, mCode: nil, cat: "tech")
+    let http = FakeHTTP()
+    http.routes = [("api.example.com/users/sara.ahmed", 200, Data(#"{"login":"sara.ahmed","name":"Someone Else"}"#.utf8))]
+    let f = try await UsernameProbe(dataset: WMNDataset(sites: [site])).run(input(name: ("Sara", "Ahmed"), emails: ["sara.ahmed@x.com"]), client: http)
+    #expect(f.isEmpty)
 }
 
 @Test func readableTextKeepsMainDropsNav() throws {
