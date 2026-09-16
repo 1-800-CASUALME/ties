@@ -58,10 +58,26 @@ final class FakeHTTP: HTTPClient, @unchecked Sendable {
     }
 }
 
-/// Builds a `ProbeInput` for a person with the given name, emails, urls, and company.
-func input(name: (String, String), emails: [String] = [], urls: [String] = [], company: String? = nil) -> ProbeInput {
+/// Builds a `ProbeInput` for a person with the given name, emails, phones, urls, and company.
+/// `phones` are already E.164, the form `Channel.normalized` carries.
+func input(
+    name: (String, String),
+    emails: [String] = [],
+    phones: [String] = [],
+    urls: [String] = [],
+    company: String? = nil
+) -> ProbeInput {
     let p = Person(givenName: name.0, familyName: name.1, organization: company)
     var ch = emails.map { Channel(personId: p.id, kind: .email, label: nil, value: $0, normalized: $0) }
+    ch += phones.map { Channel(personId: p.id, kind: .phone, label: nil, value: $0, normalized: $0) }
     ch += urls.map { Channel(personId: p.id, kind: .url, label: nil, value: $0, normalized: $0) }
     return ProbeInput(person: p, channels: ch)
+}
+
+/// A fresh, empty directory under the system temporary directory for a test to write into.
+func tmp() -> URL {
+    let url = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ties-test-\(UUID().uuidString)", isDirectory: true)
+    try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+    return url
 }
