@@ -39,6 +39,7 @@ struct ExtractView: View {
             ProgressCaptionView(
                 progress: state.extractProgress,
                 startedAt: state.extractStartedAt,
+                work: .extract,
                 onCancel: stop,
                 paused: false,
                 showsPause: false
