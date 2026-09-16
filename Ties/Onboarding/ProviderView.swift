@@ -17,6 +17,9 @@ struct ProviderView: View {
     @State private var modelName = ""
     @State private var validating = false
     @State private var validationError: String?
+    /// The in-flight `validate()` call, held so leaving the step or changing provider can
+    /// cancel it instead of letting it finish against a screen that has moved on.
+    @State private var validationTask: Task<Void, Never>?
 
     /// The tiers in catalogue order; each becomes one row of the grid, divided from the next.
     private let tiers: [ProviderTier] = [.onDevice, .freeCloud, .cli, .local, .paidCloud, .custom]
@@ -49,6 +52,7 @@ struct ProviderView: View {
         .padding(.top, 28)
         .padding(.bottom, 4)
         .task { await detectAll() }
+        .onDisappear(perform: cancelValidation)
     }
 
     // MARK: - Grid
@@ -156,6 +160,7 @@ struct ProviderView: View {
     // MARK: - Actions
 
     private func select(_ id: String) {
+        cancelValidation()
         state.providerId = id
         model.selectedProviderId = id
         validationError = nil
@@ -193,20 +198,48 @@ struct ProviderView: View {
     /// Builds the chosen provider and makes it answer one throwaway prompt. A key that is
     /// wrong, a local server that isn't running, or a CLI that isn't installed all surface
     /// here rather than halfway through the extraction.
+    ///
+    /// The call can take seconds against a slow provider, and Back stays enabled throughout,
+    /// so the task is kept rather than fired and forgotten — see `finishValidation`.
     private func validateAndContinue() {
+        guard let id = state.providerId else { return }
+        cancelValidation()
         validating = true
         validationError = nil
-        Task {
+        validationTask = Task {
             do {
                 let provider = try model.makeProvider()
                 try await provider.validate()
-                validating = false
-                state.next()
+                finishValidation(for: id, error: nil)
             } catch {
-                validating = false
-                validationError = describe(error)
+                finishValidation(for: id, error: describe(error))
             }
         }
+    }
+
+    /// Applies a finished validation only while it still describes what is on screen: the run
+    /// wasn't cancelled, the wizard is still on this step, and the same provider is chosen.
+    ///
+    /// Without that check a user who presses Continue and then Back gets silently pushed
+    /// forward from whatever screen they backed into, seconds later, by a call they had
+    /// already walked away from — `WizardState` is shared, so `next()` moves the wizard
+    /// wherever it now happens to be.
+    private func finishValidation(for id: String, error: String?) {
+        validating = false
+        guard !Task.isCancelled, state.step == .provider, state.providerId == id else { return }
+        if let error {
+            validationError = error
+        } else {
+            state.next()
+        }
+    }
+
+    /// Abandons an in-flight validation and frees the button, for when the answer has stopped
+    /// mattering: the step is being left, or a different provider has been picked.
+    private func cancelValidation() {
+        validationTask?.cancel()
+        validationTask = nil
+        validating = false
     }
 
     /// `ProviderError` carries no user-facing text of its own, and its `localizedDescription`
