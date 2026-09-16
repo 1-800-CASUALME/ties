@@ -279,6 +279,16 @@ private struct ResearchSettingsView: View {
         )
     }
 
+    /// How many hidden web views the web search runs at once. Rebuilding the pool throws away
+    /// its web views, so this is written through on each step rather than on some later commit
+    /// — a stepper has no "done", and the next scan is what reads it.
+    private var poolSize: Binding<Int> {
+        Binding(
+            get: { model.searchPoolSize },
+            set: { model.setSearchPoolSize($0) }
+        )
+    }
+
     var body: some View {
         Form {
             Section {
@@ -290,8 +300,18 @@ private struct ResearchSettingsView: View {
                     model.setSearchBackend(model.searchBackendId)
                 }
                 ScanModePicker(mode: mode)
+                Stepper(value: poolSize, in: 1...AppModel.maxPoolSize) {
+                    Label {
+                        Text(model.searchPoolSize == 1
+                            ? "One web search at a time"
+                            : "\(model.searchPoolSize) web searches at once")
+                    } icon: {
+                        Image(systemName: "square.grid.2x2")
+                    }
+                }
+                .help("Parallel web searches")
             } footer: {
-                Text("DuckDuckGo needs no key and is used whenever the chosen engine has none. Quick runs one or two searches, fifteen username sites and three pages for each person; thorough runs four searches, forty sites and every page. Both take effect on the next research run.")
+                Text("DuckDuckGo needs no key and is used whenever the chosen engine has none; it runs in hidden web views, and more of them means more people researched at once. Quick runs one or two searches, fifteen username sites and three pages for each person; thorough runs four searches, forty sites and every page. All three take effect on the next research run.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

@@ -19,6 +19,7 @@ final class AppModel {
         static let hasCompletedSetup = "hasCompletedSetup"
         static let selectedProviderId = "selectedProviderId"
         static let searchBackend = "searchBackend"
+        static let searchPoolSize = "searchPoolSize"
         static let scanMode = "scanMode"
         static let providerConfigPrefix = "providerConfig."
     }
@@ -36,6 +37,9 @@ final class AppModel {
     /// The chosen engine's id: "duckduckgo", "tavily" or "exa". Held as well as written to
     /// `UserDefaults` so the pickers showing it redraw when it changes.
     private(set) var searchBackendId: String
+    /// How many hidden web views the web-search pool runs, 1-4. Held here as well as in
+    /// `UserDefaults` so the stepper in Settings and the hint on the Scan screen agree.
+    private(set) var searchPoolSize: Int
     /// How deeply a scan digs. Quick by default: someone researching hundreds of contacts is
     /// the case that hurts, and thorough is half a minute each. Held here as well as in
     /// `UserDefaults` so the two pickers showing it redraw when either changes it.
@@ -125,6 +129,7 @@ final class AppModel {
         self.embedder = embedder
         self.searchBackend = AppModel.makeSearchBackend(defaults: defaults, client: http)
         self.searchBackendId = defaults.string(forKey: Keys.searchBackend) ?? "duckduckgo"
+        self.searchPoolSize = AppModel.poolSize(defaults: defaults)
         self.scanMode = defaults.string(forKey: Keys.scanMode).flatMap(ScanMode.init(rawValue:)) ?? .quick
         self.setupCompleted = defaults.bool(forKey: Keys.hasCompletedSetup)
         self.providerId = defaults.string(forKey: Keys.selectedProviderId)
@@ -281,11 +286,13 @@ final class AppModel {
         }
         defaults.removeObject(forKey: Keys.selectedProviderId)
         defaults.removeObject(forKey: Keys.searchBackend)
+        defaults.removeObject(forKey: Keys.searchPoolSize)
         defaults.removeObject(forKey: Keys.scanMode)
         defaults.removeObject(forKey: Keys.hasCompletedSetup)
 
         providerId = nil
         searchBackendId = "duckduckgo"
+        searchPoolSize = AppModel.defaultPoolSize
         scanMode = .quick
         searchBackend = AppModel.makeSearchBackend(defaults: defaults, client: http)
         setupCompleted = false
@@ -340,29 +347,33 @@ final class AppModel {
 
     /// How many people are researched at once.
     ///
-    /// The web-view engine runs one DuckDuckGo query at a time — that is what the single
-    /// `WKWebView` behind it can do — so people scanned in parallel queue up behind each
-    /// other's searches and more of them buys nothing. Tavily and Exa are HTTP calls that
-    /// genuinely overlap, so a wider batch is a wider batch.
+    /// The web-search pool runs one query per hidden web view, so scanning people two-deep
+    /// per view keeps every view busy without queueing a third query behind each of them.
+    /// Tavily and Exa are HTTP calls that genuinely overlap, so they get a flat six.
     private var scanConcurrency: Int {
-        searchRunsOneAtATime ? 4 : 6
+        usesWebSearchPool ? 2 * searchPoolSize : 6
     }
 
     /// The id of the engine that is actually searching, which is not always
-    /// `searchBackendId`: an engine whose key has gone missing falls back to DuckDuckGo
+    /// `searchBackendId`: an engine whose key has gone missing falls back to the web views
     /// underneath, and anything deciding what the research is really doing has to ask the
     /// backend rather than the saved choice.
+    ///
+    /// The pool reports itself as "pool"; what the engine menu and the pickers mean by
+    /// "DuckDuckGo" is that whole family of hidden web views, so that is what they are told.
     var activeSearchBackendId: String {
-        searchBackend.id
+        searchBackend.id == AppModel.poolBackendId ? AppModel.webBackendId : searchBackend.id
     }
 
-    /// Whether the engine actually in use searches one query at a time.
-    var searchRunsOneAtATime: Bool {
-        activeSearchBackendId == AppModel.serialBackendId
+    /// Whether the research is searching through the pool of hidden web views rather than an
+    /// API engine.
+    var usesWebSearchPool: Bool {
+        searchBackend.id == AppModel.poolBackendId
     }
 
-    /// The id `WebKitSearchBackend` reports.
-    private static let serialBackendId = "duckduckgo"
+    /// The id `SearchPool` reports, and the one the UI calls that pool by.
+    private static let poolBackendId = "pool"
+    private static let webBackendId = "duckduckgo"
 
     func makeExtractor() throws -> Extractor {
         Extractor(store: store, provider: try makeProvider(), embedder: embedder)
@@ -432,8 +443,36 @@ final class AppModel {
         searchBackend = AppModel.makeSearchBackend(defaults: defaults, client: http)
     }
 
-    /// DuckDuckGo via an off-screen web view unless the user picked an API-key backend and
-    /// actually has a key for it.
+    /// Saves how many hidden web views the pool runs and rebuilds the backend around the new
+    /// number, so the next scanner searches through that many. Clamped to 1-4: one is the old
+    /// serial behaviour, and past four the engine notices before the Mac does.
+    func setSearchPoolSize(_ size: Int) {
+        let clamped = min(max(size, 1), AppModel.maxPoolSize)
+        guard clamped != searchPoolSize else { return }
+        defaults.set(clamped, forKey: Keys.searchPoolSize)
+        searchPoolSize = clamped
+        // The same path a changed engine takes: the backend is rebuilt from what is saved,
+        // which is now a pool of `clamped` web views.
+        setSearchBackend(searchBackendId)
+    }
+
+    static let maxPoolSize = 4
+    static let defaultPoolSize = 2
+
+    /// The saved pool size, clamped into range — a `0` from a never-written key means "not
+    /// set", not "no web views".
+    private static func poolSize(defaults: UserDefaults) -> Int {
+        let saved = defaults.integer(forKey: Keys.searchPoolSize)
+        guard saved > 0 else { return defaultPoolSize }
+        return min(saved, maxPoolSize)
+    }
+
+    /// A pool of hidden web views unless the user picked an API-key backend and actually has a
+    /// key for it.
+    ///
+    /// The workers are built here rather than in `TiesCore` because a `WKWebView` is the app's
+    /// to own; the pool itself knows nothing about WebKit, only that it has N things that can
+    /// answer a query and a list of engines to move them onto when one hits a bot wall.
     private static func makeSearchBackend(defaults: UserDefaults, client: any HTTPClient) -> any SearchBackend {
         switch defaults.string(forKey: Keys.searchBackend) {
         case "tavily":
@@ -447,6 +486,10 @@ final class AppModel {
         default:
             break
         }
-        return WebKitSearchBackend()
+
+        let engines = SearchEngine.enabledEngines
+        let first = engines.first ?? .duckduckgo
+        let workers = (0..<poolSize(defaults: defaults)).map { _ in WebKitSearchBackend(engine: first) }
+        return SearchPool(workers: workers, engines: engines)
     }
 }

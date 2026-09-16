@@ -55,8 +55,8 @@ struct ScanView: View {
                         .fixedSize()
                     engineMenu
                 }
-                if model.searchRunsOneAtATime {
-                    Text("DuckDuckGo runs one search at a time. Tavily or Exa are several times faster.")
+                if model.usesWebSearchPool {
+                    Text("Web search runs \(model.searchPoolSize) at a time. Tavily or Exa are faster.")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                         .transition(.opacity)
@@ -64,7 +64,7 @@ struct ScanView: View {
             }
             .padding(.horizontal, 20)
             .padding(.bottom, 6)
-            .animation(.snappy, value: model.searchRunsOneAtATime)
+            .animation(.snappy, value: model.usesWebSearchPool)
 
             ProgressCaptionView(
                 progress: state.scanProgress,
