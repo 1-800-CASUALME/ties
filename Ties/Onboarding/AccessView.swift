@@ -69,35 +69,63 @@ struct AccessView: View {
         .padding(40)
         .animation(.snappy, value: granted)
         .animation(.snappy, value: denied)
+        .task { await readCurrentStatus() }
+    }
+
+    /// The system already knows the answer from a previous run: someone who granted access
+    /// last time should land on "Continue" with their contacts loaded, and someone who
+    /// refused should see the denied options rather than a button that does nothing.
+    private func readCurrentStatus() async {
+        guard state.access == .notDetermined else { return }
+        working = true
+        state.access = await model.contacts.accessStatus()
+        if state.access == .authorized, state.imported.isEmpty {
+            await loadContacts()
+        }
+        working = false
     }
 
     private func requestAccess() {
         working = true
         errorMessage = nil
         Task {
-            let access = await model.contacts.requestAccess()
-            state.access = access
-            if access == .authorized {
-                do {
-                    state.imported = try await model.contacts.fetchAll()
-                    state.contactCount = state.imported.count
-                } catch {
-                    errorMessage = error.localizedDescription
-                }
+            state.access = await model.contacts.requestAccess()
+            if state.access == .authorized {
+                await loadContacts()
             }
             working = false
         }
     }
 
-    /// Writes the imported contacts into the store before moving on, so every later screen
-    /// works from `Person` rows rather than the import.
-    private func syncAndContinue() {
+    private func loadContacts() async {
         do {
-            state.contactCount = try ContactSync.sync(state.imported, into: model.store)
-            errorMessage = nil
-            state.next()
+            state.imported = try await model.contacts.fetchAll()
+            state.contactCount = state.imported.count
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    /// Writes the imported contacts into the store before moving on, so every later screen
+    /// works from `Person` rows rather than the import. The write itself runs off the main
+    /// actor: a large address book is thousands of upserts, and the window has to keep
+    /// drawing while they happen.
+    private func syncAndContinue() {
+        let contacts = state.imported
+        let store = model.store
+        working = true
+        errorMessage = nil
+        Task {
+            do {
+                state.contactCount = try await Task.detached {
+                    try ContactSync.sync(contacts, into: store)
+                }.value
+                working = false
+                state.next()
+            } catch {
+                working = false
+                errorMessage = error.localizedDescription
+            }
         }
     }
 
