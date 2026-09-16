@@ -32,6 +32,10 @@ extension Store {
             let channelsByResolvedId = Dictionary(grouping: channels) { resolvedIds[$0.personId] ?? $0.personId }
             for resolvedId in Set(resolvedIds.values) {
                 try Self.saveChannels(channelsByResolvedId[resolvedId] ?? [], personId: resolvedId, db: db)
+                // The FTS row is built from the person's own name/organization/job title, so a
+                // re-sync that renames or re-companies someone has to rewrite it here too —
+                // otherwise the index keeps answering with the old text.
+                try Self.rewriteFTS(db, personId: resolvedId)
             }
         }
     }
@@ -41,6 +45,9 @@ extension Store {
         try writer.write { db in
             try person.insert(db)
             try Self.saveChannels(channels, personId: person.id, db: db)
+            // Without this a manually added person has no `profile_fts` row at all until they
+            // are researched, so `ask` cannot see them even by name.
+            try Self.rewriteFTS(db, personId: person.id)
         }
     }
 
@@ -49,6 +56,7 @@ extension Store {
         try writer.write { db in
             try person.update(db)
             try Self.saveChannels(channels, personId: person.id, db: db)
+            try Self.rewriteFTS(db, personId: person.id)
         }
     }
 
