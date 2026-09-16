@@ -3,7 +3,10 @@ import Foundation
 /// Orchestrates a research scan across a batch of people: runs every `Probe` for each person,
 /// groups and scores the resulting findings, writes the candidates to the `Store`, and streams
 /// `ScanProgress` as the run proceeds. Supports pausing (stops starting new people, lets
-/// in-flight ones finish) and cancelling (same, but the stream ends promptly afterward).
+/// in-flight ones finish) and cancelling (same, but the stream ends promptly afterward, even
+/// mid-backoff). Only one run can be active at a time; a `run(personIds:)` call while another is
+/// still in progress is rejected with an immediate, single-event stream rather than disturbing
+/// the active run.
 public actor Scanner {
     private let store: Store
     private let probes: [any Probe]
@@ -17,6 +20,10 @@ public actor Scanner {
     private var paused = false
     private var cancelled = false
     private var continuation: AsyncStream<ScanProgress>.Continuation?
+    /// The `Task` running the active `execute(personIds:)`. Kept so a run in progress is
+    /// visible/trackable beyond just the continuation; `run(personIds:)` is rejected while this
+    /// (or `continuation`) is non-nil.
+    private var runTask: Task<Void, Never>?
     private var completed = 0
     private var total = 0
 
@@ -39,8 +46,20 @@ public actor Scanner {
     /// Starts scanning `personIds` and returns immediately with a stream of progress events.
     /// The actual work runs in a `Task` owned by the actor (independent of the caller's task),
     /// so the stream keeps delivering events even if the caller doesn't stay suspended on this
-    /// call. The stream's final event always has `finished == true`.
+    /// call. The stream's final event always has `finished == true` — whether the run completes
+    /// normally, fails to enqueue, or (see below) is rejected outright.
+    ///
+    /// If a scan is already running, this call doesn't touch it: it returns a separate stream
+    /// whose only event is `ScanProgress(completed: 0, total: 0, waitingFor: "Another scan is
+    /// running", finished: true)`.
     public func run(personIds: [String]) -> AsyncStream<ScanProgress> {
+        guard continuation == nil else {
+            let (busyStream, busyContinuation) = AsyncStream<ScanProgress>.makeStream(of: ScanProgress.self)
+            busyContinuation.yield(ScanProgress(completed: 0, total: 0, currentName: nil, waitingFor: "Another scan is running", finished: true))
+            busyContinuation.finish()
+            return busyStream
+        }
+
         let (stream, continuation) = AsyncStream<ScanProgress>.makeStream(of: ScanProgress.self)
         self.continuation = continuation
         self.completed = 0
@@ -48,7 +67,7 @@ public actor Scanner {
         self.cancelled = false
         self.paused = false
 
-        Task {
+        runTask = Task {
             await self.execute(personIds: personIds)
         }
 
@@ -65,8 +84,10 @@ public actor Scanner {
         paused = false
     }
 
-    /// Stops scheduling any further people. People already in flight finish normally; the
-    /// stream ends (with a final `finished == true` event) once they do.
+    /// Stops scheduling any further people. People already in flight finish normally, but a
+    /// probe currently backing off after a challenge/rate-limit response gives up its retry
+    /// promptly (within one backoff-polling interval) rather than waiting out the full delay.
+    /// The stream ends (with a final `finished == true` event) once nothing is left in flight.
     public func cancel() {
         cancelled = true
     }
@@ -75,6 +96,7 @@ public actor Scanner {
         do {
             try store.enqueue(kind: .scan, personIds: personIds)
         } catch {
+            continuation?.yield(ScanProgress(completed: completed, total: total, waitingFor: "\(error)", finished: true))
             finishStream()
             return
         }
@@ -106,11 +128,14 @@ public actor Scanner {
                 completed += 1
                 continuation?.yield(ScanProgress(completed: completed, total: total, currentName: finishedName, finished: false))
 
+                // The pause gate sits immediately before `startNext()` (not before this whole
+                // block) so a completion that arrives while paused is still counted and
+                // reported right away; only *starting the next person* waits on `resume()`.
                 if !cancelled {
                     await waitWhilePaused()
-                }
-                if !cancelled {
-                    startNext()
+                    if !cancelled {
+                        startNext()
+                    }
                 }
             }
         }
@@ -125,9 +150,24 @@ public actor Scanner {
         }
     }
 
+    /// Sleeps for `duration`, but in ≤250ms chunks, re-checking `cancelled` between each chunk —
+    /// so a `cancel()` fired mid-backoff is observed within one chunk instead of only after the
+    /// whole duration (which, for a 300s challenge backoff, would otherwise make `cancel()`
+    /// effectively unusable for minutes).
+    private func sleepUnlessCancelled(_ duration: Duration) async {
+        var remaining = duration
+        let chunk = Duration.milliseconds(250)
+        while remaining > .zero, !cancelled {
+            let step = min(remaining, chunk)
+            try? await Task.sleep(for: step)
+            remaining -= step
+        }
+    }
+
     private func finishStream() {
         continuation?.finish()
         continuation = nil
+        runTask = nil
     }
 
     /// Runs every probe for one person, scores the findings, and writes the resulting
@@ -161,20 +201,25 @@ public actor Scanner {
                     findings.append(contentsOf: result)
                 } catch SearchBackendError.challenge {
                     continuation?.yield(ScanProgress(completed: completed, total: total, currentName: displayName, waitingFor: "DuckDuckGo", finished: false))
-                    try? await Task.sleep(for: challengeBackoff)
-                    do {
-                        let retryResult = try await probe.run(probeInput, client: client)
-                        findings.append(contentsOf: retryResult)
-                    } catch {
-                        errors.append("\(probe.id): \(error)")
+                    await sleepUnlessCancelled(challengeBackoff)
+                    if !cancelled {
+                        do {
+                            let retryResult = try await probe.run(probeInput, client: client)
+                            findings.append(contentsOf: retryResult)
+                        } catch {
+                            errors.append("\(probe.id): \(error)")
+                        }
                     }
                 } catch HTTPError.rateLimited(let retryAfter) {
-                    try? await Task.sleep(for: .seconds(retryAfter))
-                    do {
-                        let retryResult = try await probe.run(probeInput, client: client)
-                        findings.append(contentsOf: retryResult)
-                    } catch {
-                        errors.append("\(probe.id): \(error)")
+                    let clampedRetryAfter = min(retryAfter, 120)
+                    await sleepUnlessCancelled(.seconds(clampedRetryAfter))
+                    if !cancelled {
+                        do {
+                            let retryResult = try await probe.run(probeInput, client: client)
+                            findings.append(contentsOf: retryResult)
+                        } catch {
+                            errors.append("\(probe.id): \(error)")
+                        }
                     }
                 } catch {
                     errors.append("\(probe.id): \(error)")
