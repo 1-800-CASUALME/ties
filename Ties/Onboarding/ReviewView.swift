@@ -22,7 +22,27 @@ struct ReviewView: View {
     @State private var rerunning: Set<String> = []
     /// The in-flight re-run per person, kept so leaving the screen can cancel them.
     @State private var rerunTasks: [String: Task<Void, Never>] = [:]
+    /// What the Mac knows about each person locally, for the "Known as" chips (§6).
+    @State private var signals: [String: LocalSignals] = [:]
+    /// People whose best candidate was verified by a link they shared themselves.
+    @State private var selfLinked: Set<String> = []
+    /// The provider's verdict per person, as read from the store and as the judge produces it.
+    @State private var judgements: [String: Judgement] = [:]
+    /// People the scorer left in real doubt: two or more pending candidates, or one that didn't
+    /// score convincingly. Only these are worth an AI call (§7.1).
+    @State private var unsure: [String] = []
+    @State private var judging = false
+    @State private var judged = 0
+    @State private var judgeTotal = 0
+    @State private var judgeTask: Task<Void, Never>?
+    /// So arriving here after the scan judges once, and coming back to the screen doesn't spend
+    /// a second round of calls on the same people.
+    @State private var judgeRequested = false
     @State private var errorMessage: String?
+
+    /// A lone pending candidate at or above this score is settled enough to leave alone — the
+    /// same line `CandidateJudge` draws, kept here so the footer's count matches what it does.
+    private static let confidentScore = 3.0
 
     var body: some View {
         @Bindable var state = state
@@ -66,21 +86,63 @@ struct ReviewView: View {
                 }
             }
 
-            // A re-run in flight is about to rewrite one of these rows; moving on mid-write
-            // would extract from results the user never saw.
-            PrimaryButton("Continue") { state.next() }
-                .disabled(!rerunning.isEmpty)
-                .padding(.vertical, 16)
+            footer
         }
         .padding(.top, 24)
-        .onAppear(perform: load)
-        .onDisappear(perform: cancelReruns)
+        .onAppear {
+            load()
+            judgeUnsure()
+        }
+        .onDisappear(perform: cancelWork)
         .sheet(item: $picking) { person in
             CandidatePickerSheet(person: person, candidates: pickerCandidates) { _ in
                 picking = nil
                 load()
             }
         }
+    }
+
+    // MARK: - Footer
+
+    /// Continue, with the judge beside it: how far its pass has got, and the way to run it
+    /// again on whoever is still uncertain.
+    private var footer: some View {
+        HStack(spacing: 12) {
+            Spacer()
+
+            if judging {
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Judging \(judged) of \(judgeTotal)…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .background(Capsule().fill(.quaternary))
+                .transition(.opacity)
+            }
+
+            // A re-run in flight is about to rewrite one of these rows; moving on mid-write
+            // would extract from results the user never saw.
+            PrimaryButton("Continue") { state.next() }
+                .disabled(!rerunning.isEmpty)
+
+            Button { judgeUnsure(again: true) } label: {
+                Image(systemName: "sparkle")
+            }
+            .buttonStyle(.borderless)
+            .imageScale(.large)
+            .disabled(judging || unsure.isEmpty)
+            .help("Ask the AI which match is right")
+            .accessibilityLabel("Judge again")
+
+            Spacer()
+        }
+        .padding(.vertical, 16)
+        .animation(.snappy, value: judging)
     }
 
     private var allSelected: Binding<Bool> {
@@ -97,6 +159,13 @@ struct ReviewView: View {
         let count = candidateCounts[person.id] ?? 0
 
         return HStack(spacing: 8) {
+            KnownAsChips(signals: signals[person.id], hasSelfLink: selfLinked.contains(person.id), limit: 2)
+
+            if let judgement = judgements[person.id] {
+                SparkleChip(reason: judgement.reason)
+                    .frame(maxWidth: 150, alignment: .trailing)
+            }
+
             ConfidencePill(score: candidate?.score ?? 0, status: candidate?.status ?? .pending)
 
             if count > 1 {
@@ -209,10 +278,31 @@ struct ReviewView: View {
             best = try model.store.bestCandidatesByPerson()
 
             var counts: [String: Int] = [:]
+            var doubtful: [String] = []
+            var linked: Set<String> = []
             for person in selected {
-                counts[person.id] = try model.store.candidates(personId: person.id).count
+                let candidates = try model.store.candidates(personId: person.id)
+                counts[person.id] = candidates.count
+
+                if let best = best[person.id],
+                   try model.store.evidence(candidateId: best.id).contains(where: { $0.kind == .selfLink }) {
+                    linked.insert(person.id)
+                }
+
+                // The same test `CandidateJudge` applies, run here so the footer can count the
+                // people it is about to ask about before it asks.
+                guard !candidates.contains(where: { $0.status == .accepted }) else { continue }
+                let pending = candidates.filter { $0.status == .pending }
+                let top = pending.map(\.score).max() ?? 0
+                if pending.count >= 2 || (pending.count == 1 && top < Self.confidentScore) {
+                    doubtful.append(person.id)
+                }
             }
             candidateCounts = counts
+            unsure = doubtful
+            selfLinked = linked
+            signals = try model.store.signalsByPerson()
+            judgements = try model.store.judgementsByPerson()
 
             // The default, and it applies whenever the selection is empty — not only on the
             // first load. This screen reloads after every pick and re-run, so a user who has
@@ -249,9 +339,51 @@ struct ReviewView: View {
         }
     }
 
-    private func cancelReruns() {
+    private func cancelWork() {
         for task in rerunTasks.values { task.cancel() }
         rerunTasks = [:]
         rerunning = []
+        judgeTask?.cancel()
+        judgeTask = nil
+        judging = false
+    }
+
+    // MARK: - The judge
+
+    /// Asks the provider about the people the scorer couldn't settle (§7.1), one at a time so
+    /// the footer can count them, and writes each verdict to the store as it lands — the chip
+    /// then survives leaving this screen and coming back.
+    ///
+    /// Nothing is accepted on the model's say-so: a verdict only puts a `sparkle` chip on the
+    /// row, and the user still picks. A person who already has a verdict is skipped unless the
+    /// button asked for another round, and a provider that can't be built means no judging at
+    /// all — this is an aid to the review, not a step in it.
+    private func judgeUnsure(again: Bool = false) {
+        guard !judging else { return }
+        // The automatic pass runs once per visit to this screen; the button is how to ask for
+        // another one.
+        guard again || !judgeRequested else { return }
+        judgeRequested = true
+
+        let ids = unsure.filter { again || judgements[$0] == nil }
+        guard !ids.isEmpty, let judge = try? model.makeJudge() else { return }
+
+        judging = true
+        judged = 0
+        judgeTotal = ids.count
+        judgeTask = model.track {
+            for id in ids {
+                guard !Task.isCancelled else { break }
+                // A verdict that fails — a model that named a candidate nobody offered, a
+                // provider that timed out — costs that one row its chip, not the pass.
+                if let verdict = try? await judge.judge(personId: id) {
+                    try? model.store.upsertJudgement(verdict)
+                    judgements[id] = verdict
+                }
+                judged += 1
+            }
+            judging = false
+            judgeTask = nil
+        }
     }
 }

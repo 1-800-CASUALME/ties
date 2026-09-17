@@ -17,6 +17,11 @@ struct PersonDetailView: View {
     @State private var profile: Profile?
     @State private var best: Candidate?
     @State private var sources: [SourcePage] = []
+    /// What this Mac knows about them locally: the names they go by, and the relationship.
+    @State private var signals: LocalSignals?
+    /// Whether the identity settled on was verified by a link they shared themselves.
+    @State private var selfLinked = false
+    @State private var drafting = false
 
     @State private var note = ""
     /// The note as the store last had it, so loading one doesn't look like the user typing it.
@@ -95,6 +100,12 @@ struct PersonDetailView: View {
                         .foregroundStyle(.secondary)
                 }
 
+                KnownAsChips(signals: signals, hasSelfLink: selfLinked)
+
+                if let signals, signals.lastContact != nil || signals.interactions > 0 {
+                    RelationshipRow(signals: signals)
+                }
+
                 HStack(spacing: 8) {
                     if let best {
                         ConfidencePill(score: best.score, status: best.status)
@@ -163,6 +174,16 @@ struct PersonDetailView: View {
             pill("Call", symbol: "phone", over: phones, action: Actions.call)
             pill("FaceTime", symbol: "video", over: phones + emails, action: Actions.facetime)
             pill("Mail", symbol: "envelope", over: emails, action: Actions.mail)
+
+            Button { drafting = true } label: {
+                Label("Draft", systemImage: "sparkle.bubble")
+            }
+            .buttonStyle(.bordered)
+            .clipShape(Capsule())
+            .help("Draft a message to \(person.displayName)")
+            .popover(isPresented: $drafting, arrowEdge: .bottom) {
+                DraftPopover(person: person, facts: profile?.facts, channels: channels)
+            }
 
             ShareLink(item: vCard, preview: SharePreview(person.displayName)) {
                 Label("Share", systemImage: "square.and.arrow.up")
@@ -305,9 +326,19 @@ struct PersonDetailView: View {
                     ForEach(facts.indices, id: \.self) { index in
                         let fact = facts[index]
                         HStack(alignment: .firstTextBaseline, spacing: 6) {
+                            // A fact the second pass couldn't find in the pages it cites is
+                            // shown, not hidden — with a dotted underline and a reason (§7.6).
                             Text(fact.text)
+                                .underline(fact.supported == false, pattern: .dot)
                                 .font(.callout)
                                 .fixedSize(horizontal: false, vertical: true)
+                            if fact.supported == false {
+                                Image(systemName: "questionmark.circle")
+                                    .imageScale(.small)
+                                    .foregroundStyle(.secondary)
+                                    .help("Not found in the sources")
+                                    .accessibilityLabel("Not found in the sources")
+                            }
                             if let url = fact.sources.first.flatMap({ URL(string: $0) }) {
                                 Link(destination: url) {
                                     Image(systemName: "link")
@@ -441,6 +472,12 @@ struct PersonDetailView: View {
             profile = try model.store.profile(personId: person.id)
             best = try model.store.bestCandidate(personId: person.id)
             sources = try model.store.pagesForAccepted(personId: person.id)
+            signals = try model.store.signals(personId: person.id)
+            // The link chip is about the identity that was settled on, so it asks the candidate
+            // the profile came from rather than every candidate the scan turned up.
+            selfLinked = try best.map { candidate in
+                try model.store.evidence(candidateId: candidate.id).contains { $0.kind == .selfLink }
+            } ?? false
             let stored = try model.store.note(personId: person.id)?.body ?? ""
             savedNote = stored
             note = stored
@@ -478,7 +515,7 @@ struct PersonDetailView: View {
             }
 
             do {
-                let extractor = try model.makeExtractor()
+                let extractor = try model.makeExtractor(factCheck: true)
                 for await event in await extractor.run(personIds: [personId]) {
                     guard !Task.isCancelled else {
                         await extractor.cancel()

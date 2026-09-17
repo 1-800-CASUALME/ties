@@ -38,6 +38,13 @@ struct DoneView: View {
                 stat(none, "nothing found", systemImage: "minus.circle", tint: .secondary)
             }
 
+            if !model.smartLists.isEmpty {
+                Label(smartListCaption, systemImage: "sparkle")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .help("Groups the AI made from what it read. They're in the sidebar.")
+            }
+
             if let errorMessage {
                 Label(errorMessage, systemImage: "exclamationmark.triangle")
                     .foregroundStyle(.red)
@@ -55,7 +62,14 @@ struct DoneView: View {
             }
         }
         .padding(40)
+        .animation(.snappy, value: model.smartLists)
         .onAppear(perform: load)
+    }
+
+    /// The grouping started as extraction ended, so it may well land while this screen is up —
+    /// which is why the count is read from the model rather than counted once like the rest.
+    private var smartListCaption: String {
+        model.smartLists.count == 1 ? "1 smart list" : "\(model.smartLists.count) smart lists"
     }
 
     private func stat(_ value: Int, _ caption: String, systemImage: String, tint: Color) -> some View {
@@ -85,6 +99,7 @@ struct DoneView: View {
         do {
             let jobs = try model.store.counts(kind: .extract)
             let best = try model.store.bestCandidatesByPerson()
+            model.loadSmartLists()
 
             withAnimation(.snappy) {
                 done = jobs[.done] ?? 0
