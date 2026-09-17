@@ -273,10 +273,99 @@ public struct MessagesCollector: SourceCollector {
         userNames.contains { NameMatcher.similarity(personName: $0, candidateName: candidate) >= NameMatcher.gate }
     }
 
+    // MARK: - Register sample
+
+    /// The user's own last `limit` messages to this person, newest first, for learning how they
+    /// write to them (spec §7.4). Text only, never stored, never leaves the Mac unless the
+    /// caller sends it.
+    ///
+    /// Only the user's own side of the person's one-to-one chats: a group message is addressed
+    /// to the room rather than to them, so it says nothing about the register the user writes to
+    /// *this* person in. Newest first, capped in SQL, and each message cut to
+    /// `sampleLength` characters so one long one can't crowd out the rest.
+    public func registerSample(for input: ProbeInput, limit: Int = 20) async throws -> [String] {
+        let handles = (input.phonesE164 + input.emails).map { $0.lowercased() }.filter { !$0.isEmpty }
+        guard !handles.isEmpty, limit > 0 else { return [] }
+
+        // Ask first, exactly as `collect` does, so a store that is only hidden by a missing Full
+        // Disk Access grant is reported as needing access rather than as missing.
+        try check(status())
+
+        // Inside a run the snapshot the session opened is reused; on its own, this copies the
+        // store for the one call and closes the copy again.
+        if let snapshot = session.current {
+            return try await readSample(handles: handles, limit: limit, from: snapshot)
+        }
+        let snapshot = try session.single(chatDB)
+        defer { snapshot.close() }
+        return try await readSample(handles: handles, limit: limit, from: snapshot)
+    }
+
+    private func readSample(handles: [String], limit: Int, from snapshot: SourceSnapshot) async throws -> [String] {
+        do {
+            return try await snapshot.reader.read { db in
+                try sample(handles: Array(Set(handles)).sorted(), limit: limit, in: db)
+            }
+        } catch let error as SourceError {
+            throw error
+        } catch {
+            // A chat.db we can't read the way we expect is malformed, not a crash.
+            throw SourceError.malformed(error.localizedDescription)
+        }
+    }
+
+    private func sample(handles: [String], limit: Int, in db: Database) throws -> [String] {
+        let handleIds = try Int64.fetchAll(
+            db,
+            sql: "SELECT ROWID FROM handle WHERE LOWER(id) IN (\(Self.placeholders(handles.count)))",
+            arguments: StatementArguments(handles)
+        )
+        guard !handleIds.isEmpty else { return [] }
+        let chatIds = try Int64.fetchAll(
+            db,
+            sql: "SELECT DISTINCT chat_id FROM chat_handle_join WHERE handle_id IN (\(Self.placeholders(handleIds.count)))",
+            arguments: StatementArguments(handleIds)
+        )
+        let directChatIds = try oneToOneChats(among: chatIds, in: db)
+        guard !directChatIds.isEmpty else { return [] }
+
+        // Rows with nothing to read are dropped here rather than after the fact, so the limit
+        // counts messages the drafter can actually learn from.
+        var arguments: [any DatabaseValueConvertible] = directChatIds
+        arguments.append(limit)
+        let rows = try Row.fetchAll(
+            db,
+            sql: """
+                SELECT m.text AS text, m.attributedBody AS attributedBody
+                FROM message m
+                JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+                WHERE m.is_from_me = 1
+                  AND cmj.chat_id IN (\(Self.placeholders(directChatIds.count)))
+                  AND (TRIM(COALESCE(m.text, '')) <> '' OR m.attributedBody IS NOT NULL)
+                GROUP BY m.ROWID
+                ORDER BY \(Self.secondsSince2001) DESC
+                LIMIT ?
+                """,
+            arguments: StatementArguments(arguments)
+        )
+        return rows.compactMap(Self.sampleText(of:))
+    }
+
+    /// One sampled message as the drafter sees it: the words Messages stored, trimmed, and cut
+    /// to length. `nil` for a row whose words turn out to be nothing at all.
+    private static func sampleText(of row: Row) -> String? {
+        guard let text = Self.text(of: row)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !text.isEmpty else { return nil }
+        return String(text.prefix(Self.sampleLength))
+    }
+
     // MARK: - Reading rules
 
     /// Spec §3: at most this many messages per person, newest first.
     static let messageCap = 500
+    /// How much of one sampled message the drafter is shown: enough to hear the register,
+    /// short enough that twenty of them stay a sample rather than a transcript.
+    static let sampleLength = 280
     /// Spec §4.1: `interactions` counts the last year.
     static let interactionWindow: TimeInterval = 365 * 24 * 60 * 60
     /// Apple writes `message.date` as nanoseconds since 2001; rows older than macOS 10.13 hold

@@ -37,11 +37,15 @@ enum WhatsAppFixture {
             (2, "Sara, ask Sarita to send it", false, hudaJID, 16),
             (2, "Sara, ask Sarita to send it", false, hudaJID, 15),
             // The user's own group message: never a source of honorifics or aliases.
-            (2, "Prof. Sara can you share it", true, nil, 14),
+            (2, ownGroupMessage, true, nil, 14),
             // Sara's own group messages: her links count, the way she writes her own name doesn't.
             (2, "Capt. Sara is on the way", false, saraJID, 13),
             (2, "my profile https://www.linkedin.com/in/sara-ahmed/", false, saraJID, 12),
             // The one-to-one chat: ZFROMJID is null there, so direction comes from ZISFROMME.
+            // The user's own lines here are the register sample spec §7.4 asks for — including
+            // one too long to sample whole and one with nothing in it at all.
+            (1, longOwnMessage, true, nil, 13.5),
+            (1, "", true, nil, 12.5),
             (1, "here is my site https://sara-ahmed.com", false, nil, 11),
             (1, "look at https://tracker.example.com/ref/123", true, nil, 10),
             (1, "see you tomorrow", true, nil, 9),
@@ -54,9 +58,24 @@ enum WhatsAppFixture {
     /// not the newer message in Omar's unrelated chat.
     static let lastContactDaysAgo: Double = 9
 
-    /// Messages in the last 365 days either direction: three in the one-to-one chat plus Sara's
+    /// Messages in the last 365 days either direction: five in the one-to-one chat plus Sara's
     /// two group messages. Other members' group chatter is not an interaction with her.
-    static let expectedInteractions = 5
+    static let expectedInteractions = 7
+
+    /// A message from the user longer than the register sample's per-message limit.
+    static let longOwnMessage = String(repeating: "that reminds me of the trip last spring. ", count: 10)
+
+    /// What the user wrote to Sara in their one-to-one chat, newest first, before the ancient
+    /// filler: never the group message the user also wrote, never the blank one, and the long
+    /// one cut to `MessagesCollector.sampleLength`.
+    static let expectedRegisterSample = [
+        "see you tomorrow",
+        "look at https://tracker.example.com/ref/123",
+        String(longOwnMessage.prefix(280)),
+    ]
+
+    /// The user's own group message: addressed to the room, not to Sara, so it is never sampled.
+    static let ownGroupMessage = "Prof. Sara can you share it"
 
     /// The group's name in WhatsApp — company-ish, so it lands in `companies`.
     static let groupName = "Clinic Team"

@@ -16,12 +16,30 @@ enum ChatDBFixture {
     /// Messages older than a year, all from the person.
     static let fillerCount = 600
     /// Recent messages: three from the other participant in the group, one from the person
-    /// there, and the two lines of the one-to-one chat.
-    static let recentCount = 6
+    /// there, the two lines of the one-to-one chat, and the five the user wrote themselves.
+    static let recentCount = 11
 
-    /// Messages that count as contact with the person: her own group message, and both lines of
-    /// the one-to-one chat. The group's other participant talking is not contact with her.
-    static let expectedInteractions = 3
+    /// Messages that count as contact with the person: her own group message, both lines of the
+    /// one-to-one chat, and the four more the user wrote in it. The group's other participant
+    /// talking is not contact with her, and neither is the user's own group message.
+    static let expectedInteractions = 7
+
+    /// What the user wrote to the person in their one-to-one chat, newest first — the register
+    /// sample spec §7.4 asks for. The empty row and the group message the user also wrote are
+    /// not in it, and the long one arrives cut to `MessagesCollector.sampleLength`.
+    static let expectedRegisterSample = [
+        "ok",
+        "Thursday works for me, let's say 4",
+        "no rush at all, whenever suits you",
+        String(longOwnMessage.prefix(280)),
+    ]
+
+    /// A message from the user longer than the sample's per-message limit.
+    static let longOwnMessage = String(repeating: "the short version is that it went well. ", count: 10)
+
+    /// The user's own group message: written to the room, not to the person, so it never
+    /// belongs in the register sample.
+    static let ownGroupMessage = "shall we all meet at four"
 
     /// How long ago the newest message involving the person was sent.
     static let lastContactDaysAgo: Double = 2
@@ -78,6 +96,20 @@ enum ChatDBFixture {
         // The one-to-one chat, one line each way.
         try insert(db, id: 700, chat: 2, handle: 1, text: "see you tomorrow", daysAgo: 3)
         try insert(db, id: 701, chat: 2, handle: 1, text: "ok", daysAgo: lastContactDaysAgo, fromMe: true)
+
+        // More of the user's own side of the one-to-one chat, for the register sample. Old
+        // enough to leave `lastContact` and the `since` tests alone, recent enough to count as
+        // interactions. The group message is the user's too, and must never be sampled: it is
+        // addressed to the room rather than to her.
+        try insert(db, id: 705, chat: 1, handle: 1, text: ownGroupMessage, daysAgo: 99, fromMe: true)
+        try insert(db, id: 710, chat: 2, handle: 1, text: "Thursday works for me, let's say 4", daysAgo: 100, fromMe: true)
+        // The user's words can live in a typedstream blob too, exactly as the person's do.
+        try insert(db, id: 711, chat: 2, handle: 1,
+                   body: TypedStreamFixture.archive("no rush at all, whenever suits you"),
+                   daysAgo: 101, fromMe: true)
+        // Nothing to learn a register from: no text and no blob either.
+        try insert(db, id: 712, chat: 2, handle: 1, daysAgo: 102, fromMe: true)
+        try insert(db, id: 713, chat: 2, handle: 1, text: longOwnMessage, daysAgo: 103, fromMe: true)
 
         for index in 0..<fillerCount {
             // Older rows use Apple's legacy seconds-since-2001 timestamps; the collector has to

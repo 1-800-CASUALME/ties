@@ -85,9 +85,9 @@ struct DraftPopover: View {
 
     // MARK: - Writing the draft
 
-    /// Asks the provider for a draft. The register sample §7.4 describes — the user's own last
-    /// messages to this person — is deliberately empty: `TiesCore` has no API for reading it
-    /// yet, so the draft comes back in a neutral register rather than the user's own.
+    /// Asks the provider for a draft in the user's own register (§7.4): their last messages to
+    /// this person are read from whichever chat store this Mac has, and go to the drafter along
+    /// with what is already known about them.
     private func write() {
         let question = need.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !question.isEmpty, !drafting else { return }
@@ -104,13 +104,22 @@ struct DraftPopover: View {
         errorMessage = nil
         let person = person
         let facts = facts
+        let probe = ProbeInput(person: person, channels: channels)
+        let stores = sampleStores
         task = model.track {
+            // The spinner stops however this ends — answered, failed, or cancelled by the
+            // popover closing while a slow store was still being read.
+            defer { drafting = false }
+            // Read here rather than on the way into the popover: a register sample comes out of
+            // a copy of a chat store, which is by far the slowest thing this view touches.
+            let sample = await Self.registerSample(for: probe, from: stores)
+            guard !Task.isCancelled else { return }
             do {
                 let written = try await drafter.draft(
                     need: question,
                     person: person,
                     facts: facts,
-                    registerSample: []
+                    registerSample: sample
                 )
                 guard !Task.isCancelled else { return }
                 draft = written
@@ -118,8 +127,51 @@ struct DraftPopover: View {
                 guard !Task.isCancelled else { return }
                 errorMessage = error.localizedDescription
             }
-            drafting = false
         }
+    }
+
+    // MARK: - The user's own register
+
+    /// The chat stores the register sample may be read from, in the order worth trying — or
+    /// neither of them.
+    ///
+    /// Nothing is read at all unless the model that will see it runs on this Mac, or the user
+    /// has opened the privacy switch for a cloud one (§7.5). `MessageDrafter` applies that same
+    /// rule to the sample it is handed; this is the earlier half of it, so a store nobody may
+    /// read is never even opened. A source switched off in Sources is left out here exactly as
+    /// it is left out of a collection.
+    private var sampleStores: (messages: MessagesCollector?, whatsapp: WhatsAppCollector?) {
+        let tier = (try? model.makeProvider())?.spec.tier
+        guard tier == .onDevice || model.shareSignals else { return (nil, nil) }
+        let messages = MessagesCollector(userNames: model.sources.userNames)
+        let whatsapp = WhatsAppCollector()
+        return (
+            model.sources.isEnabled(messages.id) ? messages : nil,
+            model.sources.isEnabled(whatsapp.id) ? whatsapp : nil
+        )
+    }
+
+    /// The user's own last messages to this person, newest first, or nothing at all.
+    ///
+    /// Messages first, WhatsApp second: whichever store this Mac can read, and whichever of the
+    /// two the user and this person actually write in — a Mac with Messages ready but no iMessage
+    /// history with them still learns the register from WhatsApp. A store that won't open (no
+    /// Full Disk Access, not installed, a schema that has moved on) simply yields nothing, and
+    /// the draft comes back in a neutral register: that is a far better answer to "write this
+    /// message" than an error about a chat database.
+    ///
+    /// `nonisolated`, so it runs off the main actor: deciding a source's status opens its store,
+    /// and reading the sample copies it.
+    private nonisolated static func registerSample(
+        for input: ProbeInput,
+        from stores: (messages: MessagesCollector?, whatsapp: WhatsAppCollector?)
+    ) async -> [String] {
+        if let messages = stores.messages, messages.status() == .ready,
+           let sample = try? await messages.registerSample(for: input), !sample.isEmpty {
+            return sample
+        }
+        guard let whatsapp = stores.whatsapp, whatsapp.status() == .ready else { return [] }
+        return (try? await whatsapp.registerSample(for: input)) ?? []
     }
 
     // MARK: - Handing it over

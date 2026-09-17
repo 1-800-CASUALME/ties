@@ -124,3 +124,62 @@ private func sara() -> ProbeInput {
     #expect(WhatsAppCollector.jid(forPhone: "+966 50 123 4567") == "966501234567@s.whatsapp.net")
     #expect(WhatsAppCollector.jid(forPhone: "not a number") == nil)
 }
+
+// MARK: - Register sample (§7.4)
+
+@Test func whatsAppRegisterSampleIsTheUsersOwnSideOfTheOneToOneChat() async throws {
+    let store = try WhatsAppFixture.make()
+    let sample = try await WhatsAppCollector(chatStorage: store).registerSample(for: sara(), limit: 3)
+
+    // Newest first, the user's own messages only, and only from the chat with her.
+    #expect(sample == WhatsAppFixture.expectedRegisterSample)
+    // Never what she wrote, never what the user wrote to the group, never a blank line.
+    #expect(!sample.contains("here is my site https://sara-ahmed.com"))
+    #expect(!sample.contains(WhatsAppFixture.ownGroupMessage))
+    #expect(!sample.contains(""))
+    // One long message is cut rather than dropped.
+    #expect(sample.allSatisfy { $0.count <= MessagesCollector.sampleLength })
+    #expect(sample.last?.count == MessagesCollector.sampleLength)
+}
+
+@Test func whatsAppRegisterSampleRespectsItsLimit() async throws {
+    let store = try WhatsAppFixture.make()
+    let c = WhatsAppCollector(chatStorage: store)
+
+    #expect(try await c.registerSample(for: sara(), limit: 1) == Array(WhatsAppFixture.expectedRegisterSample.prefix(1)))
+    #expect(try await c.registerSample(for: sara(), limit: 0).isEmpty)
+    // Beyond the recent lines there is nothing but ancient filler, so the default 20 is filled
+    // out with it rather than reaching past this chat.
+    let twenty = try await c.registerSample(for: sara())
+    #expect(twenty.count == 20)
+    #expect(Array(twenty.prefix(3)) == WhatsAppFixture.expectedRegisterSample)
+    #expect(twenty.dropFirst(3).allSatisfy { $0 == "ok" })
+}
+
+@Test func whatsAppRegisterSampleReusesTheRunsSnapshot() async throws {
+    let store = try WhatsAppFixture.make()
+    let session = WhatsAppCollector(chatStorage: store)
+    try await session.beginSession()
+    _ = try await session.collect(for: sara(), since: nil)
+    #expect(try await session.registerSample(for: sara(), limit: 3) == WhatsAppFixture.expectedRegisterSample)
+    #expect(session.snapshotsOpened == 1)
+    await session.endSession()
+}
+
+@Test func whatsAppRegisterSampleIsEmptyWithoutAPhone() async throws {
+    let store = try WhatsAppFixture.make()
+    let c = WhatsAppCollector(chatStorage: store)
+
+    #expect(try await c.registerSample(for: input(name: ("Sara", "Ahmed"))).isEmpty)
+    // A number WhatsApp has never seen has no chat to sample.
+    #expect(try await c.registerSample(for: input(name: ("Sara", "Ahmed"), phones: ["+15550100100"])).isEmpty)
+}
+
+@Test func whatsAppRegisterSampleFromAnUnavailableSourceYieldsNothing() async {
+    let missing = WhatsAppCollector(chatStorage: URL(fileURLWithPath: "/nonexistent/ChatStorage.sqlite"))
+
+    // Same `status()`-first rule as `collect`: the caller is told why, and a caller that only
+    // wants a sample (`try?`) is left with nothing and drafts in a neutral register.
+    await #expect(throws: SourceError.self) { _ = try await missing.registerSample(for: sara()) }
+    #expect((try? await missing.registerSample(for: sara())) ?? [] == [])
+}

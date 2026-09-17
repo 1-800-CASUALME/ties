@@ -105,6 +105,89 @@ struct MessagesCollectorTests {
         #expect(unknown.sources.isEmpty)
     }
 
+    // MARK: - Register sample (§7.4)
+
+    @Test func registerSampleIsTheUsersOwnSideOfTheOneToOneChat() async throws {
+        let db = try ChatDBFixture.make(at: tmp())
+        let c = MessagesCollector(chatDB: db, userNames: ["Asim"])
+        let sample = try await c.registerSample(
+            for: input(name: ("Sara", "Ahmed"), phones: [ChatDBFixture.personHandle])
+        )
+
+        // Newest first, the user's own messages only, and only from the one-to-one chat —
+        // including the one whose words live in a typedstream blob.
+        #expect(sample == ChatDBFixture.expectedRegisterSample)
+        // Nothing the person wrote, nothing anyone wrote in the group, and nothing the user
+        // wrote *to the group* — a room is not this person.
+        #expect(!sample.contains("see you tomorrow"))
+        #expect(!sample.contains(ChatDBFixture.ownGroupMessage))
+        #expect(!sample.contains { $0.hasPrefix("filler") })
+        // A message with no text and no blob teaches nothing, so it is never sampled.
+        #expect(!sample.contains(""))
+        // One long message is cut rather than dropped.
+        #expect(sample.allSatisfy { $0.count <= MessagesCollector.sampleLength })
+        #expect(sample.last?.count == MessagesCollector.sampleLength)
+    }
+
+    @Test func registerSampleRespectsItsLimit() async throws {
+        let db = try ChatDBFixture.make(at: tmp())
+        let c = MessagesCollector(chatDB: db, userNames: [])
+        let probe = input(name: ("Sara", "Ahmed"), phones: [ChatDBFixture.personHandle])
+
+        #expect(try await c.registerSample(for: probe, limit: 2) == Array(ChatDBFixture.expectedRegisterSample.prefix(2)))
+        #expect(try await c.registerSample(for: probe, limit: 1) == Array(ChatDBFixture.expectedRegisterSample.prefix(1)))
+        // A limit of nothing reads nothing at all.
+        #expect(try await c.registerSample(for: probe, limit: 0).isEmpty)
+        // Asking for more than there is is not an error.
+        #expect(try await c.registerSample(for: probe, limit: 500) == ChatDBFixture.expectedRegisterSample)
+    }
+
+    @Test func registerSampleReusesTheRunsSnapshot() async throws {
+        let db = try ChatDBFixture.make(at: tmp())
+        let probe = input(name: ("Sara", "Ahmed"), phones: [ChatDBFixture.personHandle])
+
+        let session = MessagesCollector(chatDB: db, userNames: [])
+        try await session.beginSession()
+        _ = try await session.collect(for: probe, since: nil)
+        #expect(try await session.registerSample(for: probe) == ChatDBFixture.expectedRegisterSample)
+        #expect(session.snapshotsOpened == 1)
+        await session.endSession()
+    }
+
+    @Test func registerSampleIsEmptyWhenThereIsNothingToRead() async throws {
+        let db = try ChatDBFixture.make(at: tmp())
+        let c = MessagesCollector(chatDB: db, userNames: [])
+
+        // A person with no handles, and a handle this store has never seen.
+        #expect(try await c.registerSample(for: input(name: ("Sara", "Ahmed"))).isEmpty)
+        #expect(try await c.registerSample(for: input(name: ("Sara", "Ahmed"), phones: ["+15550100100"])).isEmpty)
+        // Someone who is only ever in the group chat has no one-to-one messages to sample.
+        #expect(try await c.registerSample(for: input(name: ("Omar", "K"), phones: [ChatDBFixture.otherHandle])).isEmpty)
+    }
+
+    @Test func registerSampleFromAnUnavailableSourceYieldsNothing() async throws {
+        let probe = input(name: ("Sara", "Ahmed"), phones: [ChatDBFixture.personHandle])
+        let missing = MessagesCollector(chatDB: URL(fileURLWithPath: "/nonexistent/chat.db"), userNames: [])
+
+        // Same `status()`-first rule as `collect`: the caller is told why, and a caller that
+        // only wants a sample (`try?`) is left with nothing and drafts in a neutral register.
+        await #expect(throws: SourceError.self) { _ = try await missing.registerSample(for: probe) }
+        #expect((try? await missing.registerSample(for: probe)) ?? [] == [])
+
+        // A store that is there but unreadable is the Full Disk Access case.
+        let db = try ChatDBFixture.make(at: tmp())
+        try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: db.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: db.path) }
+        guard !FileManager.default.isReadableFile(atPath: db.path) else { return }  // running as root
+        do {
+            _ = try await MessagesCollector(chatDB: db, userNames: []).registerSample(for: probe)
+            Issue.record("expected SourceError.needsAccess")
+        } catch SourceError.needsAccess {
+        } catch {
+            Issue.record("expected SourceError.needsAccess, got \(error)")
+        }
+    }
+
     @Test func statusReportsMissingAndUnreadable() throws {
         let missing = MessagesCollector(chatDB: URL(fileURLWithPath: "/nonexistent/chat.db"), userNames: [])
         #expect(missing.status() == .unavailable)

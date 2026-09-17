@@ -301,6 +301,70 @@ public struct WhatsAppCollector: SourceCollector {
         return (last.map(Date.init(timeIntervalSinceReferenceDate:)), recent ?? 0)
     }
 
+    // MARK: - Register sample
+
+    /// The user's own last `limit` messages to this person, newest first, for learning how they
+    /// write to them (spec §7.4). Text only, never stored, never leaves the Mac unless the
+    /// caller sends it.
+    ///
+    /// Only the user's own side of the person's one-to-one chats: a group message is addressed
+    /// to the room rather than to them, so it says nothing about the register the user writes to
+    /// *this* person in. Newest first, capped in SQL, and each message cut to
+    /// `MessagesCollector.sampleLength` characters — the same sample the Messages collector
+    /// produces, from the other store.
+    public func registerSample(for input: ProbeInput, limit: Int = 20) async throws -> [String] {
+        let jids = Set(input.phonesE164.compactMap(Self.jid(forPhone:))).sorted()
+        // No phone number means no WhatsApp address to look for; don't even copy the store.
+        guard !jids.isEmpty, limit > 0 else { return [] }
+
+        // Ask first, exactly as `collect` does: without Full Disk Access the store's own
+        // existence is hidden, so opening it first would report a missing store where access is
+        // what is missing.
+        try check(status())
+
+        if let snapshot = session.current {
+            return try await readSample(from: snapshot, jids: jids, limit: limit)
+        }
+        let snapshot = try session.single(chatStorage)
+        defer { snapshot.close() }
+        return try await readSample(from: snapshot, jids: jids, limit: limit)
+    }
+
+    private func readSample(from snapshot: SourceSnapshot, jids: [String], limit: Int) async throws -> [String] {
+        do {
+            return try await snapshot.reader.read { db in
+                try sample(db, jids: jids, limit: limit)
+            }
+        } catch let error as DatabaseError {
+            // A store whose Core Data shape has moved on is not an access problem.
+            throw SourceError.malformed(error.message ?? "unreadable ChatStorage.sqlite")
+        }
+    }
+
+    private func sample(_ db: Database, jids: [String], limit: Int) throws -> [String] {
+        let direct = try sessionIds(db, jids: jids).direct.sorted()
+        guard !direct.isEmpty else { return [] }
+
+        // Messages with nothing to read are dropped here rather than after the fact, so the
+        // limit counts messages the drafter can actually learn from.
+        var arguments: [any DatabaseValueConvertible] = direct
+        arguments.append(limit)
+        let texts = try String.fetchAll(
+            db,
+            sql: """
+                SELECT ZTEXT FROM ZWAMESSAGE
+                WHERE ZCHATSESSION IN (\(Self.placeholders(direct.count)))
+                  AND ZISFROMME = 1 AND ZTEXT IS NOT NULL AND TRIM(ZTEXT) <> ''
+                ORDER BY ZMESSAGEDATE DESC LIMIT ?
+                """,
+            arguments: StatementArguments(arguments)
+        )
+        return texts.compactMap { text in
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : String(trimmed.prefix(MessagesCollector.sampleLength))
+        }
+    }
+
     // MARK: - Test support
 
     #if DEBUG
