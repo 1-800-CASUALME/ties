@@ -97,7 +97,9 @@ public enum ContactSync {
     /// of their address. `nil` when the contact holds none of it.
     static func signals(from contact: ImportedContact, personId: String, knownAs name: String) -> LocalSignals? {
         var aliases: [String] = []
+        var strongAliases: [String] = []
         var honorifics: [String] = []
+        var honorificsAsWritten: [String] = []
         var links: [String] = []
 
         // A nickname that is only the person's name again says nothing new — the same gate the
@@ -105,11 +107,15 @@ public enum ContactSync {
         if let nickname = contact.nickname,
            NameMatcher.similarity(personName: name, candidateName: nickname) < SignalRules.aliasNameGate {
             aliases.append(nickname)
+            // Someone typed this name for this person by hand; that is as strong as a push name.
+            strongAliases.append(nickname)
         }
 
         if let note = contact.note {
             let names = [name, contact.givenName, contact.familyName].filter { !$0.isEmpty }
-            honorifics = SignalRules.honorifics(in: note, names: names)
+            let found = SignalRules.honorificsFound(in: note, names: names)
+            honorifics = found.map(\.canonical)
+            honorificsAsWritten = found.map(\.asWritten)
             // The alias rule keeps its usual "at least three mentions" bar. A note is short and
             // its first word is usually capitalised ("Met at the clinic…"), so a lower bar turns
             // ordinary prose into names the person supposedly goes by; the nickname field above
@@ -129,7 +135,9 @@ public enum ContactSync {
         let signals = LocalSignals(
             personId: personId,
             aliases: aliases,
+            strongAliases: strongAliases,
             honorifics: honorifics,
+            honorificsAsWritten: honorificsAsWritten,
             links: links,
             location: place.isEmpty ? nil : place,
             sources: ["contacts"]

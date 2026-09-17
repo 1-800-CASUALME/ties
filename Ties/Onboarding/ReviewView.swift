@@ -45,7 +45,7 @@ struct ReviewView: View {
 
     /// A lone pending candidate at or above this score is settled enough to leave alone — the
     /// same line `CandidateJudge` draws, kept here so the footer's count matches what it does.
-    fileprivate static let confidentScore = 3.0
+    nonisolated fileprivate static let confidentScore = 3.0
 
     var body: some View {
         @Bindable var state = state

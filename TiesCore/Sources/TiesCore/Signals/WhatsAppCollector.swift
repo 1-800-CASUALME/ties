@@ -127,13 +127,16 @@ public struct WhatsAppCollector: SourceCollector {
         let names = [input.fullName]
 
         let text = try messageText(db, jids: Set(jids), sessions: sessions, since: since)
-        signals.honorifics = SignalRules.honorifics(in: text.byOtherMembers, names: names)
-        signals.aliases = Self.union(
-            pushNames.filter {
-                NameMatcher.similarity(personName: input.fullName, candidateName: $0) < SignalRules.aliasNameGate
-            },
-            SignalRules.aliases(in: text.byOtherMembers, names: names)
-        )
+        let found = SignalRules.honorificsFound(in: text.byOtherMembers, names: names)
+        signals.honorifics = found.map(\.canonical)
+        signals.honorificsAsWritten = found.map(\.asWritten)
+        // A push name is what the person typed about themselves, so it is strong enough to admit
+        // a candidate on its own; a name overheard in a group chat is not.
+        let selfSet = pushNames.filter {
+            NameMatcher.similarity(personName: input.fullName, candidateName: $0) < SignalRules.aliasNameGate
+        }
+        signals.strongAliases = selfSet
+        signals.aliases = Self.union(selfSet, SignalRules.aliases(in: text.byOtherMembers, names: names))
         signals.links = SignalRules.links(in: text.byPerson)
         signals.companies = try companies(db, groups: sessions.group)
 

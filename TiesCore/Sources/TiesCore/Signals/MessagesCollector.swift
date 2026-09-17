@@ -173,10 +173,14 @@ public struct MessagesCollector: SourceCollector {
         let companies = try companies(chatIds: chatIds, in: db)
         let tally = try tally(handleIds: handleIds, directChatIds: directChatIds, since: since, in: db)
 
+        let found = SignalRules.honorificsFound(in: othersText, names: names)
         return LocalSignals(
             personId: input.person.id,
+            // Deliberately not `strongAliases`: a name overheard in a group chat is as likely to
+            // be another member's as this person's.
             aliases: SignalRules.aliases(in: othersText, names: names).filter { !isUserName($0) },
-            honorifics: SignalRules.honorifics(in: othersText, names: names),
+            honorifics: found.map(\.canonical),
+            honorificsAsWritten: found.map(\.asWritten),
             companies: companies,
             links: SignalRules.links(in: byPerson.joined(separator: "\n")),
             lastContact: tally.lastContact,
