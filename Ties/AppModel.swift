@@ -294,6 +294,11 @@ final class AppModel {
         defaults.removeObject(forKey: Keys.scanMode)
         defaults.removeObject(forKey: Keys.hasCompletedSetup)
         defaults.removeObject(forKey: Keys.shareSignals)
+        // The source toggles are part of "everything" too: a fresh start should not remember
+        // which of the user's chats and mail Ties was allowed to read.
+        for key in defaults.dictionaryRepresentation().keys where key.hasPrefix("sources.") {
+            defaults.removeObject(forKey: key)
+        }
 
         signalsShared = false
         smartLists = []

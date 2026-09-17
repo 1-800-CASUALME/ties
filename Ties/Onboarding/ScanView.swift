@@ -77,6 +77,7 @@ struct ScanView: View {
             ProgressCaptionView(
                 progress: collecting ? state.collectProgress : state.scanProgress,
                 startedAt: collecting ? state.collectStartedAt : state.scanStartedAt,
+                work: collecting ? .collect : .research,
                 onPause: pause,
                 onResume: resume,
                 onCancel: collecting ? stopCollecting : stop,

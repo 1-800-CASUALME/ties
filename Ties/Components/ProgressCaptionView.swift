@@ -15,7 +15,7 @@ struct ProgressCaptionView: View {
     /// on: research walks a person through probe after probe, extraction is one AI call per
     /// person and has no stages to report.
     enum Work {
-        case research, extract
+        case research, extract, collect
     }
 
     let progress: ScanProgress
@@ -127,7 +127,13 @@ struct ProgressCaptionView: View {
             switch work {
             case .research: return "Researching \(name)…"
             case .extract: return "Extracting \(name)'s profile…"
+            case .collect: return "Looking through what you have on \(name)…"
             }
+        }
+        // Collection reads local stores rather than searching the web: "Reading your chats
+        // with Ada" is what it is doing, and it names the source the same way the rows do.
+        if work == .collect {
+            return "Reading \(stage) with \(name)…"
         }
         // The one probe that reads rather than searches; "Searching their pages for Ada" is not
         // what it does.
@@ -140,6 +146,7 @@ struct ProgressCaptionView: View {
     private var headlineIcon: String {
         if progress.waitingFor != nil { return "clock" }
         if progress.stage == "their pages" { return "doc.text.magnifyingglass" }
+        if work == .collect { return "tray.full" }
         if progress.stage != nil { return "magnifyingglass" }
         return work == .extract ? "sparkles" : "person.crop.circle.badge.questionmark"
     }
