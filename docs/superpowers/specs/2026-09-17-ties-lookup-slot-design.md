@@ -16,12 +16,21 @@ reverse-engineer any phone app's private API, and does not upload a single conta
 to one. It ships the place where a service the user already has access to plugs in, and it treats
 what comes back with the scepticism a crowd-sourced label deserves.
 
-Two backends ship:
+Three catalogue entries ship, across two backends:
 
 - **Twilio Lookup** — documented, paid, consented. `caller_name` is CNAM, the same record a phone
   shows when it rings, and is United States only. `line_type_intelligence` answers worldwide.
 - **Custom** — a URL template, a header, and two paths into the response. Anything with an HTTP
   endpoint and an API key, described by the user rather than coded by Ties.
+- **GetContact** — the same backend with a **preset**: the mapping a tag-style reply needs
+  (`result.tags[]` → `tag`, `count`, crowd-sourced) filled in, and the endpoint left empty. A
+  preset is not an integration. It ships no URL and no token, and `isUsable` is false until the
+  user supplies one, so choosing the row on its own calls nothing. It exists because the mapping
+  is the tedious half and the access is the half only the user can hold.
+
+Entries with `usesCustomEndpoint` keep their endpoint under `lookup.config.<id>`, one per service,
+so choosing a second row never inherits the first one's URL. `CustomLookupProvider` carries the
+catalogue id it is standing in for, so a result says which service answered.
 
 ## 2. Where it sits
 

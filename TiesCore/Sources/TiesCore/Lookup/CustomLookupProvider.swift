@@ -8,13 +8,22 @@ import Foundation
 /// any particular service is built in here — no endpoint, no token format, no vendor's private
 /// API — which is what keeps this a slot the user fills rather than a scraper Ties ships.
 public struct CustomLookupProvider: LookupProvider {
-    public let id = LookupCatalog.customId
+    /// Which catalogue entry this is standing in for. Every described endpoint is served by this
+    /// one type, so the id comes from the entry rather than being fixed here — otherwise every
+    /// answer would claim to have come from "custom" whatever the user picked.
+    public let id: String
 
     private let config: CustomLookupConfig
     private let key: String?
     private let client: any HTTPClient
 
-    public init(config: CustomLookupConfig, key: String?, client: any HTTPClient) {
+    public init(
+        id: String = LookupCatalog.customId,
+        config: CustomLookupConfig,
+        key: String?,
+        client: any HTTPClient
+    ) {
+        self.id = id
         self.config = config
         self.key = key
         self.client = client

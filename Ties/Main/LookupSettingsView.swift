@@ -55,8 +55,8 @@ struct LookupSettingsView: View {
                     }
                 }
 
-                if spec.id == LookupCatalog.customId {
-                    customEndpointSection
+                if spec.usesCustomEndpoint {
+                    customEndpointSection(spec)
                 }
 
                 Section {
@@ -81,7 +81,7 @@ struct LookupSettingsView: View {
         .animation(.snappy, value: selectedId)
         .onAppear {
             selectedId = LookupSettings.selectedId()
-            config = LookupSettings.customConfig()
+            config = LookupSettings.config(for: selectedId ?? LookupCatalog.customId)
             budget = LookupSettings.budget()
         }
     }
@@ -89,11 +89,17 @@ struct LookupSettingsView: View {
     // MARK: - The described endpoint
 
     @ViewBuilder
-    private var customEndpointSection: some View {
+    private func customEndpointSection(_ spec: LookupSpec) -> some View {
         Section {
             TextField("URL", text: field(\.urlTemplate), prompt: Text("https://api.example.com/v1/numbers/{phone_plain}"))
                 .textFieldStyle(.roundedBorder)
                 .autocorrectionDisabled()
+            if spec.preset != nil, config.urlTemplate.isEmpty {
+                // The one thing a preset cannot fill in, said where the empty box is.
+                Label("Ties ships no endpoint for \(spec.name). Paste the URL your own access gives you — the reply below is already mapped.", systemImage: "info.circle")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             HStack(spacing: 8) {
                 TextField("Header", text: optionalField(\.headerName), prompt: Text("Authorization"))
                 TextField("Header value", text: field(\.headerTemplate), prompt: Text("Bearer {key}"))
@@ -259,6 +265,9 @@ struct LookupSettingsView: View {
     private func choose(_ id: String) {
         selectedId = selectedId == id ? nil : id
         LookupSettings.setSelectedId(selectedId)
+        // Each service keeps its own endpoint, so switching tiles loads that one's rather than
+        // carrying the last one's URL across.
+        config = LookupSettings.config(for: selectedId ?? id)
         testResult = nil
         testMessage = nil
         refreshStatus()
@@ -304,7 +313,8 @@ struct LookupSettingsView: View {
     }
 
     private func commitConfig() {
-        LookupSettings.setCustomConfig(config)
+        guard let id = selectedId else { return }
+        LookupSettings.setConfig(config, for: id)
         refreshStatus()
     }
 
@@ -379,7 +389,7 @@ private struct LookupTile: View {
                 .interpolation(.high)
                 .scaledToFit()
         } else {
-            Image(systemName: "puzzlepiece.extension")
+            Image(systemName: spec.fallbackSymbol)
                 .font(.system(size: 26))
                 .symbolRenderingMode(.hierarchical)
                 .foregroundStyle(.secondary)

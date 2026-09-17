@@ -84,12 +84,15 @@ ever agreeing to it, and it is the one thing Ties promises never to do. What Tie
 | Service | What it answers |
 | --- | --- |
 | Twilio Lookup | The name registered to the line (CNAM, United States only), plus carrier and line type worldwide. Documented, paid per lookup, your own key. |
+| GetContact | The names other people saved a number under. Ties ships **no endpoint and no token** for it — GetContact has no public API, and the unofficial ones work by uploading your whole address book. Bring access you already have; the reply is already mapped for you. |
 | Custom | Any HTTP service you already have access to. You give the URL, the header your key goes in, and where the names and labels sit in the answer. No code. |
 
-The custom slot is the honest answer to "there must be a way": if you have your own access to a
-service — a business account, an API key, anything with an HTTP endpoint — you describe it in
-Settings › Lookup and Ties uses it. Ties will not reverse-engineer a phone app's private API to get
-at a database you have not been given access to.
+The last two rows are the honest answer to "there must be a way": if you have your own access to a
+service — a business account, an API key, anything with an HTTP endpoint — you paste its URL into
+Settings › Lookup and Ties uses it. A named row like GetContact is a **preset, not an integration**:
+it fills in which key of the reply is the name and which is the count, and leaves the endpoint and
+the key to you. Ties will not reverse-engineer a phone app's private API, and will not upload your
+address book to earn access to a database built out of everyone else's.
 
 What comes back is used the way it deserves. A name **registered to the line** counts as strongly as
 a name someone set on their own WhatsApp account: it can settle which web profile is theirs. A name

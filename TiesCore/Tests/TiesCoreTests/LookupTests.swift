@@ -309,8 +309,34 @@ private final class CountingProvider: LookupProvider, @unchecked Sendable {
     #expect(provider.calls.isEmpty)
 }
 
+@Test func aPresetMapsTheReplyAndStillHasNoEndpointToCall() throws {
+    let spec = try #require(LookupCatalog.spec(LookupCatalog.getcontactId))
+    let preset = try #require(spec.preset)
+
+    #expect(spec.usesCustomEndpoint)
+    // The half a preset can honestly fill in.
+    #expect(preset.namesPath == "result.tags[]")
+    #expect(preset.nameField == "tag")
+    #expect(preset.countField == "count")
+    #expect(preset.namesAreCrowd)
+    // The half it must not: no endpoint ships, so nothing can be called until the user has
+    // their own access.
+    #expect(preset.urlTemplate.isEmpty)
+    #expect(!preset.isUsable)
+
+    // With a URL of the user's own, the preset reads a tag-shaped reply without another word
+    // being typed.
+    var configured = preset
+    configured.urlTemplate = "https://their-own-access.example/v1/{phone_plain}"
+    #expect(configured.isUsable)
+    let provider = CustomLookupProvider(id: spec.id, config: configured, key: "k", client: FakeHTTP())
+    let result = provider.parse(try JSONSerialization.jsonObject(with: crowdAnswer))
+    #expect(result.names.map(\.value) == ["Dr Sara", "Sara Ahmed"])
+    #expect(result.providerId == LookupCatalog.getcontactId)
+}
+
 @Test func everyCatalogueEntryHasAKeyFieldAndAnHonestLineAboutWhatItAnswers() {
-    #expect(LookupCatalog.all.count >= 2)
+    #expect(LookupCatalog.all.count >= 3)
     for spec in LookupCatalog.all {
         #expect(!spec.secretLabel.isEmpty)
         #expect(spec.coverage.count > 40)

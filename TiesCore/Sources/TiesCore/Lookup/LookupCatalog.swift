@@ -5,8 +5,10 @@ import Foundation
 public struct LookupSpec: Identifiable, Sendable, Hashable {
     public let id: String
     public let name: String
-    /// Asset name, equal to `id`; a missing asset falls back to a symbol, as in the AI grid.
+    /// Asset name, equal to `id`; a missing asset falls back to `fallbackSymbol`, as in the AI grid.
     public let logo: String
+    /// Drawn when there is no logo asset for this service.
+    public let fallbackSymbol: String
     /// Label for the first credential, or `nil` when the service needs only one.
     public let identifierLabel: String?
     public let secretLabel: String
@@ -16,23 +18,36 @@ public struct LookupSpec: Identifiable, Sendable, Hashable {
     /// lookup that returns nothing for every number outside the United States is a fact worth
     /// reading before paying for it.
     public let coverage: String
+    /// True when this entry is a described endpoint rather than a coded integration: the user
+    /// supplies the URL, and `CustomLookupProvider` does the calling.
+    public let usesCustomEndpoint: Bool
+    /// The mapping this service's answers usually need, filled in for the user. Never an
+    /// endpoint: a preset saves the tedious half — which key in the reply is the name, which is
+    /// the count — and leaves the half only the user's own access can supply.
+    public let preset: CustomLookupConfig?
 
     public init(
         id: String,
         name: String,
         logo: String? = nil,
+        fallbackSymbol: String = "puzzlepiece.extension",
         identifierLabel: String? = nil,
         secretLabel: String,
         keyURL: String? = nil,
-        coverage: String
+        coverage: String,
+        usesCustomEndpoint: Bool = false,
+        preset: CustomLookupConfig? = nil
     ) {
         self.id = id
         self.name = name
         self.logo = logo ?? id
+        self.fallbackSymbol = fallbackSymbol
         self.identifierLabel = identifierLabel
         self.secretLabel = secretLabel
         self.keyURL = keyURL
         self.coverage = coverage
+        self.usesCustomEndpoint = usesCustomEndpoint
+        self.preset = preset
     }
 }
 
@@ -104,16 +119,44 @@ public struct CustomLookupConfig: Codable, Sendable, Hashable {
 /// The lookup services Ties knows how to talk to.
 public enum LookupCatalog {
     public static let twilioId = "twilio"
+    public static let getcontactId = "getcontact"
     public static let customId = "custom-lookup"
+
+    /// The shape a "what do other people save this number as" service answers in: a list of
+    /// labels, each with how many people used it. It is the mapping, not the service — there is
+    /// no URL here, and there is no token here.
+    static let tagServicePreset = CustomLookupConfig(
+        urlTemplate: "",
+        headerName: "Authorization",
+        headerTemplate: "{key}",
+        namesPath: "result.tags[]",
+        nameField: "tag",
+        countField: "count",
+        tagsPath: "",
+        tagField: nil,
+        namesAreCrowd: true
+    )
 
     public static let all: [LookupSpec] = [
         LookupSpec(
             id: twilioId,
             name: "Twilio Lookup",
+            fallbackSymbol: "phone.badge.checkmark",
             identifierLabel: "Account SID",
             secretLabel: "Auth Token",
             keyURL: "https://www.twilio.com/console",
             coverage: "The name registered to the line (CNAM), plus carrier and line type. Caller name is United States only; carrier and line type are worldwide. Billed per lookup, including lookups that find nothing."
+        ),
+        LookupSpec(
+            id: getcontactId,
+            name: "GetContact",
+            fallbackSymbol: "person.2.badge.key.fill",
+            identifierLabel: nil,
+            secretLabel: "Key",
+            keyURL: "https://business.getcontact.com/",
+            coverage: "The names other people saved a number under. Ties ships no endpoint and no token for it: GetContact has no public API, and the unofficial ones work by uploading your whole address book — which Ties will not do. Bring access you already have, paste its URL, and the reply is already mapped for you.",
+            usesCustomEndpoint: true,
+            preset: tagServicePreset
         ),
         LookupSpec(
             id: customId,
@@ -121,7 +164,8 @@ public enum LookupCatalog {
             identifierLabel: nil,
             secretLabel: "Key",
             keyURL: nil,
-            coverage: "Any HTTP service you already have access to. You give the URL and say where the names and tags sit in its answer; the key is kept in the Keychain and sent only in the header you name."
+            coverage: "Any HTTP service you already have access to. You give the URL and say where the names and tags sit in its answer; the key is kept in the Keychain and sent only in the header you name.",
+            usesCustomEndpoint: true
         ),
     ]
 
