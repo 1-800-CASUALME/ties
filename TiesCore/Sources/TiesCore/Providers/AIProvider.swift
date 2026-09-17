@@ -51,20 +51,45 @@ extension ProviderError {
     }
 }
 
-/// One AI backend that can turn web text into `ProfileFacts`.
+/// One AI backend.
 ///
-/// Conformers implement a single model call (`extractChunk`); the chunking, the
-/// context-window retry, and the merge across chunks are shared by every provider through
-/// the default `extract` below.
+/// Conformers implement a single model call, `complete`: send `system`/`user`, get back the
+/// bytes of one JSON object matching `schemaJSON`. Everything above that — the extraction
+/// prompt, the chunking, the context-window retry, the merge across chunks — is shared by
+/// every provider through the defaults below, and every later AI feature (candidate judge,
+/// smart lists, query expansion, fact check, drafts) asks for its own schema through the same
+/// one call rather than growing a per-provider method of its own.
 public protocol AIProvider: Sendable {
     var spec: ProviderSpec { get }
-    /// One model call: send `system`/`user` and return the facts the model produced.
+    /// One model call constrained to a schema: returns the raw bytes of the JSON object the
+    /// model produced, for the caller to decode.
+    ///
+    /// `schemaJSON` is a JSON Schema document; `schemaName` names it for the providers that
+    /// label their structured output (OpenAI's `json_schema.name`, Anthropic's tool name).
+    /// Providers that cannot constrain the model ask for the schema in the prompt instead, so
+    /// the bytes are what the model *said* it produced — decode defensively.
+    func complete(system: String, user: String, schemaJSON: String, schemaName: String) async throws -> Data
+    /// One model call for the extraction schema. Defaulted in terms of `complete`; a provider
+    /// overrides it only when it has a better path for this one schema (Apple's on-device
+    /// guided generation does).
     func extractChunk(system: String, user: String) async throws -> ProfileFacts
     /// A cheap round-trip that proves the provider is reachable and configured.
     func validate() async throws
 }
 
 extension AIProvider {
+    /// The extraction call every provider shares: ask for the profile-facts schema, decode
+    /// what comes back with the tolerant decoder.
+    public func extractChunk(system: String, user: String) async throws -> ProfileFacts {
+        let data = try await complete(
+            system: system,
+            user: user,
+            schemaJSON: ProfileFactsSchema.json,
+            schemaName: ProfileFactsSchema.name
+        )
+        return try ProfileFactsSchema.decode(data)
+    }
+
     /// Runs the full extraction for one person: split the collected pages into
     /// context-sized chunks, make one model call per chunk, and merge the results.
     ///
@@ -102,5 +127,20 @@ extension AIProvider {
             system: ExtractionPrompt.system,
             user: ExtractionPrompt.user(input: input, chunk: chunk)
         )
+    }
+}
+
+/// A schema string as the Foundation JSON value a request body can embed directly.
+///
+/// Providers take schemas as strings (a CLI flag, a file, a line of prompt all want text), but
+/// the HTTP providers build their bodies with `JSONSerialization` and need the parsed value.
+enum SchemaJSON {
+    static func value(_ schemaJSON: String) throws -> Any {
+        guard let value = try? JSONSerialization.jsonObject(with: Data(schemaJSON.utf8)),
+              value is [String: Any]
+        else {
+            throw ProviderError.badResponse("not a JSON Schema object: \(schemaJSON.prefix(200))")
+        }
+        return value
     }
 }

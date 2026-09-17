@@ -13,6 +13,8 @@ struct SettingsView: View {
                 .tabItem { Label("Providers", systemImage: "sparkles") }
             ResearchSettingsView()
                 .tabItem { Label("Research", systemImage: "magnifyingglass") }
+            SourcesSettingsView()
+                .tabItem { Label("Sources", systemImage: "tray.full") }
         }
         .frame(width: 600, height: 480)
     }
@@ -214,6 +216,7 @@ private struct ProviderSettingsView: View {
 
             if let selectedSpec {
                 ProviderFields(spec: selectedSpec)
+                privacyRow(selectedSpec)
             }
 
             Divider()
@@ -225,6 +228,43 @@ private struct ProviderSettingsView: View {
         }
         .padding(20)
         .task { await detectAll() }
+    }
+
+    /// The privacy switch (§7.5), next to the provider it is about. Off, a cloud provider gets
+    /// public snippets and Contacts-level facts only; the judge, the expansion and the drafting
+    /// run without the signals this Mac collected, and a draft gets no register sample.
+    ///
+    /// The lock says what the switch means for *this* provider: Apple Intelligence runs on this
+    /// Mac, so nothing leaves it whatever the switch says, and the lock is open because the
+    /// signals are in fact available to it.
+    private func privacyRow(_ spec: ProviderSpec) -> some View {
+        let open = model.shareSignals || spec.tier == .onDevice
+        let explanation = spec.tier == .onDevice
+            ? "\(spec.name) runs on this Mac, so your signals never leave it."
+            : open
+                ? "Aliases, titles, companies and honorifics are sent to \(spec.name). Never a message, a subject line, or your address book."
+                : "\(spec.name) sees public snippets and Contacts details only."
+
+        return HStack(spacing: 10) {
+            Image(systemName: open ? "lock.open" : "lock")
+                .foregroundStyle(open ? .secondary : Color.accentColor)
+                .help(explanation)
+                .accessibilityLabel(explanation)
+
+            Toggle("Let cloud AI see local signals", isOn: shareSignals)
+                .toggleStyle(.switch)
+                .help(explanation)
+
+            Spacer(minLength: 0)
+        }
+        .animation(.snappy, value: open)
+    }
+
+    private var shareSignals: Binding<Bool> {
+        Binding(
+            get: { model.shareSignals },
+            set: { model.shareSignals = $0 }
+        )
     }
 
     /// Probes every catalogue entry at once rather than in sequence: the slowest rules shell out
@@ -279,6 +319,16 @@ private struct ResearchSettingsView: View {
         )
     }
 
+    /// How many hidden web views the web search runs at once. Rebuilding the pool throws away
+    /// its web views, so this is written through on each step rather than on some later commit
+    /// — a stepper has no "done", and the next scan is what reads it.
+    private var poolSize: Binding<Int> {
+        Binding(
+            get: { model.searchPoolSize },
+            set: { model.setSearchPoolSize($0) }
+        )
+    }
+
     var body: some View {
         Form {
             Section {
@@ -290,8 +340,18 @@ private struct ResearchSettingsView: View {
                     model.setSearchBackend(model.searchBackendId)
                 }
                 ScanModePicker(mode: mode)
+                Stepper(value: poolSize, in: 1...AppModel.maxPoolSize) {
+                    Label {
+                        Text(model.searchPoolSize == 1
+                            ? "One web search at a time"
+                            : "\(model.searchPoolSize) web searches at once")
+                    } icon: {
+                        Image(systemName: "square.grid.2x2")
+                    }
+                }
+                .help("Parallel web searches")
             } footer: {
-                Text("DuckDuckGo needs no key and is used whenever the chosen engine has none. Quick runs one or two searches, fifteen username sites and three pages for each person; thorough runs four searches, forty sites and every page. Both take effect on the next research run.")
+                Text("DuckDuckGo needs no key and is used whenever the chosen engine has none; it runs in hidden web views, and more of them means more people researched at once. Quick runs one or two searches, fifteen username sites and three pages for each person; thorough runs four searches, forty sites and every page. All three take effect on the next research run.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

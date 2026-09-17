@@ -16,10 +16,18 @@ public actor Scanner {
     private let probes: [any Probe]
     private let client: any HTTPClient
     private let weights: ScoringWeights
+    /// How deeply each person is researched. Quick skips web search entirely for anyone whose
+    /// own links already say who they are.
+    private let mode: ScanMode
     private let concurrency: Int
     /// How long to back off after a `SearchBackendError.challenge` before retrying the probe
     /// once. An `init` parameter (rather than a hardcoded 300s) so tests can shorten it.
     private let challengeBackoff: Duration
+    /// The wall clock one person gets before the rest of their probes are given up on (spec
+    /// §5). `nil` means no cap. Defaults to the mode's own budget; an `init` parameter so tests
+    /// can shorten it to something a test can wait out.
+    private let perPersonBudget: Duration?
+    private let clock = ContinuousClock()
 
     private var paused = false
     private var cancelled = false
@@ -41,15 +49,19 @@ public actor Scanner {
         probes: [any Probe],
         client: any HTTPClient,
         weights: ScoringWeights = .default,
+        mode: ScanMode = .thorough,
         concurrency: Int = 4,
-        challengeBackoff: Duration = .seconds(60)
+        challengeBackoff: Duration = .seconds(60),
+        perPersonBudget: Duration? = nil
     ) {
         self.store = store
         self.probes = probes
         self.client = client
         self.weights = weights
+        self.mode = mode
         self.concurrency = concurrency
         self.challengeBackoff = challengeBackoff
+        self.perPersonBudget = perPersonBudget ?? mode.perPersonBudget
     }
 
     /// Starts scanning `personIds` and returns immediately with a stream of progress events.
@@ -155,6 +167,25 @@ public actor Scanner {
         finishStream()
     }
 
+    /// Hosts where a link says nothing about who owns it: shorteners, and the stores of files
+    /// and videos anyone can post to.
+    private static let sharedHosts = [
+        "bit.ly", "t.co", "lnkd.in", "goo.gl", "tinyurl.com", "wa.me", "t.me",
+        "youtube.com", "youtu.be", "docs.google.com", "drive.google.com",
+    ]
+
+    /// True when a link the person shared themselves is worth fetching as their identity: a
+    /// profile on linkedin.com, github.com or x.com, or their own domain. `SignalRules` only
+    /// keeps identity-shaped URLs in the first place, so everything that isn't behind a
+    /// shortener or on a file/video host is one of those two.
+    static func isCandidateWorthy(_ url: String) -> Bool {
+        guard let components = URLComponents(string: url),
+              let scheme = components.scheme?.lowercased(),
+              scheme == "https" || scheme == "http",
+              let host = components.host?.lowercased() else { return false }
+        return !sharedHosts.contains { host == $0 || host.hasSuffix("." + $0) }
+    }
+
     private func waitWhilePaused() async {
         while paused && !cancelled {
             try? await Task.sleep(for: .milliseconds(200))
@@ -201,13 +232,69 @@ public actor Scanner {
             }
 
             let channels = try store.channels(personId: personId)
-            let probeInput = ProbeInput(person: person, channels: channels)
+            let signals = try? store.signals(personId: personId)
+            let probeInput = ProbeInput(person: person, channels: channels, signals: signals)
+            // A local binding, because the closures the budget runs the probes in are
+            // `@Sendable` and may not capture the actor implicitly.
+            let client = self.client
 
             var findings: [ProbeFinding] = []
             var errors: [String] = []
             var finishedStages: [String] = []
 
-            for probe in probes {
+            // The page probe can run twice for one person — once on the links they shared, once
+            // on the URLs on their contact card — and the progress line should say "their pages"
+            // once either way.
+            func finishStage(_ stage: String) {
+                guard !finishedStages.contains(stage) else { return }
+                finishedStages.append(stage)
+            }
+
+            // A link the person shared or signed with themselves settles who they are, so it is
+            // fetched directly rather than hoped for in a search result. In quick mode that
+            // makes the web search redundant — the expensive probe skipped for the one case
+            // where its answer is already known.
+            // Whatever the probes have found when the person's wall clock runs out is what
+            // gets scored (spec §5). The deadline is the person's, not the run's: every person
+            // gets the same budget however slow the one before them was.
+            let deadline = perPersonBudget.map { clock.now.advanced(by: $0) }
+            var budgetSpent = false
+
+            /// Everything from `position` on never got its turn.
+            func recordBudgetExceeded(from position: Int) {
+                budgetSpent = true
+                for probe in probes[position...] {
+                    errors.append("\(probe.id): budget exceeded")
+                }
+            }
+
+            let selfLinks = (signals?.links ?? []).filter(Scanner.isCandidateWorthy)
+            let skipSearch = mode == .quick && !selfLinks.isEmpty
+            if !selfLinks.isEmpty {
+                // The probe list's own page probe where there is one, so the run's page budget
+                // is the mode's either way.
+                let pageProbe = probes.compactMap { $0 as? PageFetchProbe }.first ?? PageFetchProbe(maxPages: mode.pagesFetched)
+                continuation?.yield(ScanProgress(
+                    completed: completed, total: total, currentName: displayName, finished: false,
+                    stage: pageProbe.displayName, finishedStages: finishedStages,
+                    notice: skippedProbes.isEmpty ? nil : Scanner.searchSkippedNotice
+                ))
+                do {
+                    findings += try await withinBudget(deadline) {
+                        await pageProbe.fetchDirect(urls: selfLinks, input: probeInput, client: client)
+                    }
+                    finishStage(pageProbe.displayName)
+                } catch is BudgetExceeded {
+                    recordBudgetExceeded(from: 0)
+                } catch {
+                    errors.append("\(pageProbe.id): \(error)")
+                }
+            }
+
+            for (position, probe) in probes.enumerated() where !budgetSpent {
+                if skipSearch, probe.id == "search" {
+                    continue
+                }
                 if skippedProbes.contains(probe.id) {
                     errors.append("\(probe.id): skipped after repeated challenges")
                     continue
@@ -218,10 +305,12 @@ public actor Scanner {
                     notice: skippedProbes.isEmpty ? nil : Scanner.searchSkippedNotice
                 ))
                 do {
-                    let result = try await probe.run(probeInput, client: client)
+                    let result = try await withinBudget(deadline) { try await probe.run(probeInput, client: client) }
                     findings.append(contentsOf: result)
                     challenges[probe.id] = 0
-                    finishedStages.append(probe.displayName)
+                    finishStage(probe.displayName)
+                } catch is BudgetExceeded {
+                    recordBudgetExceeded(from: position)
                 } catch SearchBackendError.challenge {
                     challenges[probe.id, default: 0] += 1
                     if challenges[probe.id, default: 0] >= maxChallenges {
@@ -242,10 +331,12 @@ public actor Scanner {
                     await sleepUnlessCancelled(challengeBackoff)
                     if !cancelled {
                         do {
-                            let retryResult = try await probe.run(probeInput, client: client)
+                            let retryResult = try await withinBudget(deadline) { try await probe.run(probeInput, client: client) }
                             findings.append(contentsOf: retryResult)
                             challenges[probe.id] = 0
-                            finishedStages.append(probe.displayName)
+                            finishStage(probe.displayName)
+                        } catch is BudgetExceeded {
+                            recordBudgetExceeded(from: position)
                         } catch {
                             errors.append("\(probe.id): \(error)")
                             if case SearchBackendError.challenge = error {
@@ -261,9 +352,11 @@ public actor Scanner {
                     await sleepUnlessCancelled(.seconds(clampedRetryAfter))
                     if !cancelled {
                         do {
-                            let retryResult = try await probe.run(probeInput, client: client)
+                            let retryResult = try await withinBudget(deadline) { try await probe.run(probeInput, client: client) }
                             findings.append(contentsOf: retryResult)
-                            finishedStages.append(probe.displayName)
+                            finishStage(probe.displayName)
+                        } catch is BudgetExceeded {
+                            recordBudgetExceeded(from: position)
                         } catch {
                             errors.append("\(probe.id): \(error)")
                         }
@@ -282,11 +375,42 @@ public actor Scanner {
                 evidence: scored.flatMap(\.evidence),
                 pages: scored.flatMap(\.pages)
             )
-            try store.setJob(kind: .scan, personId: personId, state: .done)
+            try store.setJob(
+                kind: .scan, personId: personId, state: .done,
+                error: errors.isEmpty ? nil : errors.joined(separator: "; ")
+            )
         } catch {
             try? store.setJob(kind: .scan, personId: personId, state: .failed, error: "\(error)")
         }
 
         return displayName
+    }
+
+    // MARK: - The per-person budget
+
+    /// Thrown when a person's wall-clock budget runs out: the probe in flight is cancelled, no
+    /// further one is started, and what has been collected is scored.
+    private struct BudgetExceeded: Error {}
+
+    /// Runs `work` under the person's remaining budget, cancelling it and throwing
+    /// `BudgetExceeded` if the deadline arrives first. With no deadline the work simply runs.
+    private func withinBudget<T: Sendable>(
+        _ deadline: ContinuousClock.Instant?,
+        _ work: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        guard let deadline else { return try await work() }
+        let remaining = clock.now.duration(to: deadline)
+        guard remaining > .zero else { throw BudgetExceeded() }
+
+        return try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask { try await work() }
+            group.addTask {
+                try await Task.sleep(for: remaining)
+                throw BudgetExceeded()
+            }
+            defer { group.cancelAll() }
+            // The first of the two to finish decides: the work's own result, or the clock.
+            return try await group.next()!
+        }
     }
 }

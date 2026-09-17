@@ -58,10 +58,39 @@ final class FakeHTTP: HTTPClient, @unchecked Sendable {
     }
 }
 
-/// Builds a `ProbeInput` for a person with the given name, emails, urls, and company.
-func input(name: (String, String), emails: [String] = [], urls: [String] = [], company: String? = nil) -> ProbeInput {
+/// Builds a `ProbeInput` for a person with the given name, emails, phones (already E.164, the
+/// form `Channel.normalized` carries), urls, company, and local signals. The signals'
+/// `personId` is rewritten to the person built here — see `localSignals(...)`.
+func input(
+    name: (String, String),
+    emails: [String] = [],
+    phones: [String] = [],
+    urls: [String] = [],
+    company: String? = nil,
+    signals: LocalSignals? = nil
+) -> ProbeInput {
     let p = Person(givenName: name.0, familyName: name.1, organization: company)
     var ch = emails.map { Channel(personId: p.id, kind: .email, label: nil, value: $0, normalized: $0) }
+    ch += phones.map { Channel(personId: p.id, kind: .phone, label: nil, value: $0, normalized: $0) }
     ch += urls.map { Channel(personId: p.id, kind: .url, label: nil, value: $0, normalized: $0) }
-    return ProbeInput(person: p, channels: ch)
+    var signals = signals
+    signals?.personId = p.id
+    return ProbeInput(person: p, channels: ch, signals: signals)
+}
+
+/// Builds a `LocalSignals` with a placeholder `personId` for `input(name:signals:)` to fill in.
+func localSignals(aliases: [String] = [], strongAliases: [String] = [], honorifics: [String] = [],
+                  honorificsAsWritten: [String] = [], titles: [String] = [], companies: [String] = [],
+                  links: [String] = [], location: String? = nil) -> LocalSignals {
+    LocalSignals(personId: "", aliases: aliases, strongAliases: strongAliases, honorifics: honorifics,
+                 honorificsAsWritten: honorificsAsWritten, titles: titles,
+                 companies: companies, links: links, location: location)
+}
+
+/// A fresh, empty directory under the system temporary directory for a test to write into.
+func tmp() -> URL {
+    let url = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ties-test-\(UUID().uuidString)", isDirectory: true)
+    try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+    return url
 }

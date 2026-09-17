@@ -46,9 +46,24 @@ public struct SearchService: Sendable {
 
     /// Answers a natural-language "who can help with X" query, blending FTS5 keyword hits with
     /// embedding cosine similarity via reciprocal rank fusion.
-    public func ask(_ query: String, limit: Int = 50) async throws -> [SearchResult] {
+    ///
+    /// `terms` are the expansion terms (§7.3), which the caller owns: it runs `QueryExpander`
+    /// once, shows the terms as removable chips, and asks again with the ones that are left —
+    /// so a term the user dismissed is a term this search never sees, and no chip is ever out
+    /// of step with the results below it. An empty `terms` is the plain search.
+    ///
+    /// The terms search alongside the query: they join the text that is embedded, and each one
+    /// runs its own keyword search, all fused into one extra list. (They can't simply be
+    /// appended to the keyword query — `ftsSearch` ANDs every term, so "taxes accountant CPA
+    /// bookkeeper" would match nobody at all; and one list, not six, keeps an expansion from
+    /// outvoting what the user typed.)
+    ///
+    /// `why` stays on the words the user actually typed, expansion or not — an excerpt
+    /// explaining a match with a word the user never wrote reads like a bug.
+    public func ask(_ query: String, limit: Int = 20, terms: [String] = []) async throws -> [SearchResult] {
         let cleaned = Self.strip(query)
         let tokens = Self.queryTokens(cleaned)
+        let expansion = terms.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
 
         // `ftsSearch` ANDs every token prefix, so handing it the raw query lets a single stop
         // word ("who can help with growth") match nothing and leave the fusion cosine-only.
@@ -56,9 +71,10 @@ public struct SearchService: Sendable {
         // typed nothing but stop words or short tokens.
         let keywordQuery = tokens.isEmpty ? cleaned : tokens.joined(separator: " ")
         let keyword = try store.ftsSearch(keywordQuery, limit: 50).map(\.personId)
+        let expanded = RankFusion.rrf(try expansion.map { try store.ftsSearch($0, limit: 50).map(\.personId) }).map(\.id)
 
         var semantic: [String] = []
-        if let queryVector = try? await embedder.embed(cleaned) {
+        if let queryVector = try? await embedder.embed(([cleaned] + expansion).joined(separator: " ")) {
             let embeddings = try store.allEmbeddings()
             semantic = embeddings
                 .map { (personId: $0.personId, cosine: Vector.cosine(queryVector, $0.vector)) }
@@ -75,7 +91,7 @@ public struct SearchService: Sendable {
         // If the embedder threw, `semantic` stays empty and RRF below fuses the keyword list
         // alone (a list of one is still a valid input to rrf).
 
-        let fused = RankFusion.rrf([keyword, semantic])
+        let fused = RankFusion.rrf([keyword, expanded, semantic])
         guard !fused.isEmpty else { return [] }
 
         let profiles = try store.profilesByPerson()

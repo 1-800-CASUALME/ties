@@ -87,6 +87,61 @@ enum Migrations {
             }
         }
 
+        migrator.registerMigration("v2") { db in
+            try db.create(table: "signal") { t in
+                t.primaryKey("personId", .text).references("person", onDelete: .cascade)
+                let jsonColumns = [
+                    "aliases", "strongAliases", "honorifics", "honorificsAsWritten",
+                    "titles", "companies", "links", "phones", "emails", "sources",
+                ]
+                for c in jsonColumns {
+                    t.column(c, .text).notNull().defaults(to: "[]")
+                }
+                t.column("location", .text)
+                t.column("lastContact", .datetime)
+                t.column("interactions", .integer).notNull().defaults(to: 0)
+                t.column("collectedAt", .datetime).notNull()
+                // The address book's own contribution, as a JSON `LocalSignals`, kept apart from
+                // the merged columns. `ContactSync` writes it when contacts are imported and
+                // `ContactsCollector` reads it back, so a collection pass can rebuild the merged
+                // columns from nothing without either losing what Contacts knows or re-injecting
+                // the previous pass's chat and mail values forever.
+                t.column("contactsSignals", .text)
+            }
+            try db.create(table: "smartList") { t in
+                t.primaryKey("id", .text)
+                t.column("name", .text).notNull()
+                t.column("systemImage", .text).notNull()
+                t.column("personIds", .text).notNull()
+                t.column("createdAt", .datetime).notNull()
+            }
+            try db.create(table: "judgement") { t in
+                t.primaryKey("personId", .text).references("person", onDelete: .cascade)
+                t.column("candidateId", .text).notNull()
+                t.column("confidence", .double).notNull()
+                t.column("reason", .text).notNull()
+                t.column("providerId", .text).notNull()
+                t.column("judgedAt", .datetime).notNull()
+            }
+        }
+
+        // v2 was edited during 0.2's development, so a database from an earlier dev build has the
+        // table without the columns added later. Migrations never re-run, so the missing ones are
+        // added here; on a database created by the final v2 there is nothing to do.
+        migrator.registerMigration("v3") { db in
+            let existing = Set(try db.columns(in: "signal").map(\.name))
+            for column in ["strongAliases", "honorificsAsWritten"] where !existing.contains(column) {
+                try db.alter(table: "signal") { t in
+                    t.add(column: column, .text).notNull().defaults(to: "[]")
+                }
+            }
+            if !existing.contains("contactsSignals") {
+                try db.alter(table: "signal") { t in
+                    t.add(column: "contactsSignals", .text)
+                }
+            }
+        }
+
         return migrator
     }
 }

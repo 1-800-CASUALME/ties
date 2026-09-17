@@ -100,3 +100,67 @@ struct FakeBackend: SearchBackend {
     #expect(matched?.evidence.contains { $0.kind == .company && $0.weight == 3 } == true)
     #expect(!f.contains { $0.url == "https://github.com/other" })
 }
+
+// MARK: - Task 7: local signals as search seeds
+
+@Test func quickSeedsOneAliasQuery() {
+    let i = input(name: ("Sara", "Ahmed"), company: "Acme",
+                  signals: localSignals(aliases: ["Sara Al-Otaibi"], honorifics: ["Dr"], titles: ["Cardiologist"]))
+    let q = SearchQueryBuilder.queries(for: i, mode: .quick)
+    #expect(q == ["\"Sara Ahmed\" \"Acme\"", "\"Sara Al-Otaibi\" \"Acme\""])
+}
+
+@Test func thoroughSeedsAll() {
+    let i = input(name: ("Sara", "Ahmed"), company: "Acme",
+                  signals: localSignals(aliases: ["Sara Ahmed", "Sara Al-Otaibi"],
+                                        honorifics: ["dr"], honorificsAsWritten: ["Dr."]))
+    let q = SearchQueryBuilder.queries(for: i, mode: .thorough)
+    #expect(q == [
+        "\"Sara Ahmed\" \"Acme\"",
+        "\"Sara Ahmed\" site:linkedin.com/in",
+        "\"Sara Ahmed\" site:github.com",
+        "\"Sara Ahmed\" (site:x.com OR site:twitter.com)",
+        "\"Sara Al-Otaibi\" \"Acme\"",
+        "\"Dr. Sara Ahmed\"",
+    ])
+}
+
+@Test func anArabicHonorificIsSearchedAsItWasWritten() {
+    // Spec §4.3: "Arabic honorifics searched as written". The canonical id is a key into the
+    // profession rules, not a word anybody has ever typed into a search box.
+    let signals = localSignals(honorifics: ["dr"], honorificsAsWritten: ["دكتورة"])
+    let queries = SearchQueryBuilder.queries(for: input(name: ("Sara", "Ahmed"), signals: signals), mode: .thorough)
+
+    #expect(queries.contains("\"دكتورة Sara Ahmed\""))
+    #expect(!queries.contains { $0.contains("\"dr ") })
+}
+
+@Test func aCanonicalOnlyHonorificSeedsNothing() {
+    // Better no seed than a dud one: in quick mode the seed budget is one query, and for a
+    // contact with an honorific and no alias the dud would be the only one there was.
+    let signals = localSignals(honorifics: ["dr", "prof"])
+    let quick = SearchQueryBuilder.queries(for: input(name: ("Sara", "Ahmed"), company: "Acme", signals: signals), mode: .quick)
+    let thorough = SearchQueryBuilder.queries(for: input(name: ("Sara", "Ahmed"), company: "Acme", signals: signals), mode: .thorough)
+
+    #expect(quick == ["\"Sara Ahmed\" \"Acme\""])
+    #expect(!thorough.contains { $0.contains("dr") || $0.contains("prof") })
+}
+
+@Test func aliasSeedFallsBackToLinkedInWithoutACompany() {
+    let i = input(name: ("Sara", "Ahmed"), signals: localSignals(aliases: ["Sara Al-Otaibi"]))
+    let q = SearchQueryBuilder.queries(for: i, mode: .quick)
+    #expect(q == ["\"Sara Ahmed\" site:linkedin.com/in", "\"Sara Ahmed\"", "\"Sara Al-Otaibi\" site:linkedin.com/in"])
+}
+
+@Test func ambiguousSingleTokenNameSeedsATitleQuery() {
+    // One-token name: the builder has nothing to search on by itself, and the signature title
+    // with the company is the only query worth running.
+    let i = input(name: ("Cher", ""), company: "Acme", signals: localSignals(titles: ["Senior Product Manager"]))
+    #expect(SearchQueryBuilder.queries(for: i) == ["\"Senior Product Manager\" \"Acme\""])
+}
+
+@Test func signalCompanySeedsTheCompanyQuery() {
+    // The company came from a mail signature rather than Contacts, and still scopes the search.
+    let i = input(name: ("Sara", "Ahmed"), signals: localSignals(companies: ["Acme"]))
+    #expect(SearchQueryBuilder.queries(for: i, mode: .quick) == ["\"Sara Ahmed\" \"Acme\""])
+}

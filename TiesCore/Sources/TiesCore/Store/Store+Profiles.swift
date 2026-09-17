@@ -63,8 +63,8 @@ extension Store {
     }
 
     /// Rebuilds the `profile_fts` row for a person from their display name, organization,
-    /// job title, profile facts, and note. Must run inside the same write transaction as the
-    /// profile/note upsert that triggered it.
+    /// job title, profile facts, note, and collected aliases and titles. Must run inside the
+    /// same write transaction as the profile/note/signal upsert that triggered it.
     static func rewriteFTS(_ db: Database, personId: String) throws {
         try db.execute(sql: "DELETE FROM profile_fts WHERE personId = ?", arguments: [personId])
 
@@ -79,6 +79,20 @@ extension Store {
         }
         if let note = try Note.fetchOne(db, key: personId) {
             parts.append(note.body)
+        }
+        // Locally collected names and titles are often the only searchable text a person has —
+        // someone with no profile is still findable by the alias their friends use. Not every
+        // person has a signal row, and rewriteFTS runs on people who never will, so a missing
+        // row is normal rather than an error.
+        if let signalRow = try SignalRow.fetchOne(db, key: personId) {
+            let signals = try signalRow.asSignals()
+            parts += signals.aliases
+            parts += signals.titles
+            // The address book's contribution sits in its own column until a collection pass
+            // folds it into the merged ones, and a nickname is exactly what someone searches by.
+            if let contacts = try signalRow.contacts() {
+                parts += contacts.aliases
+            }
         }
 
         let content = parts.joined(separator: "\n")

@@ -26,6 +26,32 @@ whole list before tagging a release; walk the affected sections before opening a
 - [ ] If access is denied: **Open System Settings** opens the Contacts privacy pane, and
       **Import .vcf…** imports a vCard file instead.
 
+## Sources
+
+- [ ] Four rows — Contacts, Messages, WhatsApp, Mail — each with the real app icon, a status glyph
+      and a toggle. **Continue** is enabled even with every toggle off.
+- [ ] Contacts is ready without any extra permission.
+- [ ] Without Full Disk Access, Messages, WhatsApp and Mail show an orange lock and "Needs Full
+      Disk Access", and **Open Privacy Settings** opens Privacy & Security › Full Disk Access.
+- [ ] Granting it there and coming back turns those rows green (macOS may ask to quit and reopen
+      Ties first); revoking it turns them back to the lock.
+- [ ] With WhatsApp not installed, its row is a gray `minus.circle` and "Not installed", and its
+      toggle changes nothing. Same for Mail on a Mac that has never opened Mail.
+- [ ] A mailbox too big to scan without Spotlight shows the Mail row's error state rather than
+      sitting on "ready" and finding nothing.
+- [ ] The research screen names the source stages first ("Reading your chats with Sara…"), then
+      the web ones. A source left off produces no stage of its own.
+- [ ] Turning every source off still researches people, from the web alone.
+- [ ] Settings › Sources shows the same four rows, and **Collect again** re-runs collection for
+      everyone with a progress pill.
+- [ ] Review rows show "Known as" chips: the nickname, the WhatsApp display name, or the name
+      other people use for them in your chats, plus the honorific where one was used ("Dr", "د.").
+      A `link` chip appears where a link the person shared themselves verified the candidate.
+- [ ] The chips match what was collected:
+      `sqlite3 ~/Library/Application\ Support/Ties/ties.sqlite 'select aliases,honorifics,titles,companies,sources from signal limit 5'`
+- [ ] Nothing was written to a source: the modification dates of `~/Library/Messages/chat.db` and
+      WhatsApp's `ChatStorage.sqlite` are unchanged after a full run.
+
 ## Select
 
 - [ ] Rows are grouped under letter headers.
@@ -99,6 +125,44 @@ Use 5–10 real contacts for this section.
       source page.
 - [ ] A note typed in **Yours** is still there after quitting and relaunching.
 - [ ] **Refresh** re-runs the scan and extraction for that person with a progress pill.
+
+## AI
+
+Needs a provider configured. Walk it once with Apple Intelligence on-device, then repeat the last
+two checks with a cloud provider.
+
+- [ ] Review: a `sparkle` chip with a one-line reason appears only on people with more than one
+      candidate, or one weak one — never on a person whose candidate was accepted automatically.
+- [ ] The chip picks; it does not accept. The row stays unsure until you choose in the candidate
+      picker, where the same reason shows on the row the AI picked.
+- [ ] The Review footer shows the judge's progress while it runs, and the screen stays usable.
+- [ ] Sidebar: smart lists appear under a `sparkle` header after extraction, each with its own
+      icon, and selecting one shows the people in it.
+- [ ] The refresh button rebuilds the lists; a list of one person never appears.
+- [ ] Ask: typing a question and pressing Return shows the expansion as chips under the field
+      within about two seconds. With no provider, or a slow one, the search still runs on what you
+      typed.
+- [ ] Removing a chip re-runs the search without that term, and the results change.
+- [ ] Person detail: **Draft** opens the popover, asks what you need, and comes back with a short
+      message.
+- [ ] **Messages** opens Messages with the right person and the text prefilled, **WhatsApp** opens
+      WhatsApp with the text prefilled, **Mail** opens a new mail with the text in the body.
+      Nothing is sent by Ties in any of the three.
+- [ ] A fact the sources do not support has a dotted underline and a `questionmark.circle` help
+      reading "Not found in the sources"; the supported facts are plain.
+- [ ] Person detail: the Relationship row reads "Talked 3 weeks ago" with the right channel icon,
+      and the strength bar matches how much you actually talk to that person.
+- [ ] Sidebar: **Reconnect** lists people with a useful profile and no contact for three months,
+      strongest tie first.
+- [ ] Settings › Providers: "Let cloud AI see local signals" is off on a fresh install and the
+      provider tile shows a closed lock; turning it on shows an open lock.
+- [ ] With the switch off and a cloud provider selected, what the judge sends carries no collected
+      signal — no alias, no honorific, no signature title or company — only the page snippets and
+      what Apple Contacts holds. With it on, those four appear and nothing else does: no message
+      text, no subject line, no phone number, no email address. (Check against a local
+      OpenAI-compatible endpoint, or Ollama's request log, selected as a custom provider.)
+- [ ] With Apple Intelligence selected, the signals are used whatever the switch says, and no
+      request leaves the Mac.
 
 ## Add and edit
 

@@ -16,6 +16,12 @@ struct MainWindow: View {
     @State private var people: [Person] = []
     @State private var profiles: [String: Profile] = [:]
     @State private var best: [String: Candidate] = [:]
+    /// What the Mac knows about each person locally, which is what Reconnect is ranked on.
+    @State private var signals: [String: LocalSignals] = [:]
+    /// The Reconnect list, worked out with the rest of the load rather than per body pass.
+    @State private var reconnect: [Person] = []
+    /// The in-flight read, so anything that changes a person can replace it rather than race it.
+    @State private var loadTask: Task<Void, Never>?
     @State private var adding = false
     @State private var errorMessage: String?
 
@@ -105,8 +111,13 @@ struct MainWindow: View {
         case .researched: "Researched"
         case .unsure: "Unsure"
         case .manual: "Manual"
-        case .smartList(let name): name
+        case .reconnect: "Reconnect"
+        case .smartList(let id): smartList(id)?.name ?? "Smart list"
         }
+    }
+
+    private func smartList(_ id: String) -> SmartList? {
+        model.smartLists.first { $0.id == id }
     }
 
     /// The people the chosen list is about. "Unsure" is the one worth spelling out: it means the
@@ -122,24 +133,94 @@ struct MainWindow: View {
             people.filter { best[$0.id]?.status == .pending }
         case .manual:
             people.filter { $0.source == .manual }
-        case .smartList:
-            []
+        case .reconnect:
+            reconnect
+        case .smartList(let id):
+            members(of: id)
         }
+    }
+
+    /// The people in one smart list, in the order the provider grouped them. Ids it named that
+    /// have since been deleted simply drop out.
+    private func members(of id: String) -> [Person] {
+        guard let list = smartList(id) else { return [] }
+        let byId = Dictionary(people.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        return list.personIds.compactMap { byId[$0] }
     }
 
     // MARK: - Loading
 
+    /// The four tables this window draws, plus the Reconnect order, read in one pass off the
+    /// main actor.
+    ///
+    /// `allPeople()` carries a thumbnail per row and `signalsByPerson()` decodes eight JSON
+    /// arrays per row; at a few thousand contacts that is long enough to be felt if it happens
+    /// where the window is drawn. Reconnect is worked out here as well rather than in a computed
+    /// property, which SwiftUI would re-evaluate on every pass over the body.
+    private struct Snapshot: Sendable {
+        var people: [Person] = []
+        var profiles: [String: Profile] = [:]
+        var best: [String: Candidate] = [:]
+        var signals: [String: LocalSignals] = [:]
+        var reconnect: [Person] = []
+        var failure: String?
+
+        init(store: Store) {
+            do {
+                people = try store.allPeople()
+                profiles = try store.profilesByPerson()
+                best = try store.bestCandidatesByPerson()
+                signals = try store.signalsByPerson()
+                reconnect = Self.reconnect(people: people, profiles: profiles, signals: signals)
+            } catch {
+                failure = error.localizedDescription
+            }
+        }
+
+        /// People worth getting back to: someone the research wrote up, last talked to more than
+        /// three months ago, strongest relationship first (§4.5). Somebody with no signals at
+        /// all isn't here — nothing on this Mac says the two of you have ever talked, so nothing
+        /// says you have stopped.
+        private static func reconnect(
+            people: [Person],
+            profiles: [String: Profile],
+            signals: [String: LocalSignals]
+        ) -> [Person] {
+            let cutoff = Date.now.addingTimeInterval(-90 * 24 * 60 * 60)
+            return people
+                .filter { person in
+                    guard profiles[person.id] != nil, let last = signals[person.id]?.lastContact else { return false }
+                    return last < cutoff
+                }
+                .sorted { lhs, rhs in
+                    let left = signals[lhs.id]?.interactions ?? 0
+                    let right = signals[rhs.id]?.interactions ?? 0
+                    // Equal strength falls back to the name, so the list doesn't reshuffle
+                    // itself between reloads.
+                    return left == right ? lhs.displayName < rhs.displayName : left > right
+                }
+        }
+    }
+
+    /// Re-reads everything, in the background. A read already in flight is dropped: whatever
+    /// asked for this one — an edit, a new person, a finished refresh — has moved the store on
+    /// since it started.
     private func load() {
-        do {
-            people = try model.store.allPeople()
-            profiles = try model.store.profilesByPerson()
-            best = try model.store.bestCandidatesByPerson()
+        loadTask?.cancel()
+        let store = model.store
+        loadTask = model.track {
+            let snapshot = await Task.detached { Snapshot(store: store) }.value
+            guard !Task.isCancelled else { return }
+            people = snapshot.people
+            profiles = snapshot.profiles
+            best = snapshot.best
+            signals = snapshot.signals
+            reconnect = snapshot.reconnect
+            errorMessage = snapshot.failure
+            model.loadSmartLists()
             if let selectedId, !people.contains(where: { $0.id == selectedId }) {
                 self.selectedId = nil
             }
-            errorMessage = nil
-        } catch {
-            errorMessage = error.localizedDescription
         }
     }
 }

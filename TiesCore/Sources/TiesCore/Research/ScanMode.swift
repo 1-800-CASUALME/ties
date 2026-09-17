@@ -44,4 +44,19 @@ public enum ScanMode: String, Codable, Sendable {
         case .thorough: .max
         }
     }
+
+    /// The wall clock one person gets, after which `Scanner` stops (spec §5).
+    ///
+    /// Quick hard-caps a person at twenty-five seconds: when it runs out no further probe is
+    /// started, the one in flight is cancelled, and whatever was collected by then is scored.
+    /// The cap is what keeps a bad web search — a challenge, a page that never finishes
+    /// loading — from turning "under ten seconds a person" into minutes without anyone
+    /// noticing. Thorough has no cap: it is the mode you pick when you want the whole answer
+    /// however long it takes.
+    public var perPersonBudget: Duration? {
+        switch self {
+        case .quick: .seconds(25)
+        case .thorough: nil
+        }
+    }
 }

@@ -2,7 +2,7 @@ import Foundation
 
 public struct Job: Identifiable, Codable, Hashable, Sendable {
     public enum Kind: String, Codable, Sendable {
-        case scan, extract
+        case scan, extract, collect, judge
     }
 
     public enum State: String, Codable, Sendable {

@@ -2,20 +2,21 @@ import Observation
 import SwiftUI
 import TiesCore
 
-/// The eight screens of first-run setup, in order. The raw values drive both `StepDots` and
+/// The nine screens of first-run setup, in order. The raw values drive both `StepDots` and
 /// `next()`/`back()`.
 enum WizardStep: Int, CaseIterable {
-    case welcome, access, select, scan, review, provider, extract, done
+    case welcome, access, sources, select, scan, provider, review, extract, done
 
     /// One word per step, for the tooltip on its dot.
     var title: String {
         switch self {
         case .welcome: "Welcome"
         case .access: "Contacts"
+        case .sources: "Sources"
         case .select: "Select"
         case .scan: "Research"
-        case .review: "Review"
         case .provider: "AI"
+        case .review: "Review"
         case .extract: "Extract"
         case .done: "Done"
         }
@@ -41,12 +42,17 @@ final class WizardState {
     var selectedIds: Set<String> = []
 
     var scanProgress = ScanProgress(completed: 0, total: 0)
+    /// The signal collection that runs on the Research step before the scanner, kept apart from
+    /// `scanProgress` so the two runs can't be read as one: they cover the same people but count
+    /// their own, and the caption switches from one to the other when the reading is done.
+    var collectProgress = ScanProgress(completed: 0, total: 0)
     var extractProgress = ScanProgress(completed: 0, total: 0)
     /// When each run in flight started, which is what the "about 4 min left" in its caption is
     /// measured from. Beside the progress rather than on the screen watching it, so a screen
     /// rebuilt mid-run — or one that picks up a run it didn't start — still has the beginning
     /// of it to measure from.
     var scanStartedAt: Date?
+    var collectStartedAt: Date?
     var extractStartedAt: Date?
     var selectedForExtract: Set<String> = []
     /// The runs in flight, held here rather than on the screens watching them: a screen that is
@@ -54,6 +60,9 @@ final class WizardState {
     /// and the stop button has to reach the actor the stream came from. Both are cleared the
     /// moment their stream ends.
     var scanner: ResearchScanner?
+    /// The signal collection in flight, held for the same reasons the scanner is: it reads the
+    /// Mac's own stores, and a run nobody is watching must still be stoppable.
+    var collector: SignalCollector?
     var extractor: Extractor?
 
     var providerId: String?
@@ -83,11 +92,14 @@ final class WizardState {
         guard step != self.step else { return }
         if self.step == .scan || self.step == .extract {
             let scanner = scanner
+            let collector = collector
             let extractor = extractor
             self.scanner = nil
+            self.collector = nil
             self.extractor = nil
             Task {
                 await scanner?.cancel()
+                await collector?.cancel()
                 await extractor?.cancel()
             }
         }

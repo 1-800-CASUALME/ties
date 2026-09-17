@@ -2,30 +2,56 @@ import Foundation
 import WebKit
 import TiesCore
 
-/// A `SearchBackend` that drives an off-screen `WKWebView` against DuckDuckGo's HTML results
-/// page, since DuckDuckGo has no public search API. Requests are serialized through a single
-/// shared web view (one query at a time, `minInterval` apart) because loading two pages into
-/// the same `WKWebView` concurrently would race.
+/// A `SearchBackend` that drives an off-screen `WKWebView` against a scrapable search
+/// engine's HTML results page, since none of them has a public API worth the name. Requests
+/// are serialized through this instance's single web view (one query at a time, roughly
+/// `minInterval` apart) because loading two pages into the same `WKWebView` concurrently
+/// would race — running several *searches* at once is `SearchPool`'s job, and it does it by
+/// owning several of these.
+///
+/// Which engine it asks is data (`SearchEngine`) rather than code, and can be changed under a
+/// running backend with `switchEngine(_:)` — that is how the pool fails a web view over to
+/// another engine after a bot wall.
 ///
 /// Main-actor isolation is what lets this class satisfy `SearchBackend: Sendable` without an
 /// explicit conformance: every stored property is only ever touched while isolated to the
 /// main actor, so there's nothing for a data race to find.
 @MainActor
-public final class WebKitSearchBackend: NSObject, SearchBackend, WKNavigationDelegate {
-    public let id = "duckduckgo"
+public final class WebKitSearchBackend: NSObject, SearchEngineSwitching, WKNavigationDelegate {
+    /// The engine this backend was built for. Deliberately fixed even when `switchEngine(_:)`
+    /// moves the web view onto another one: it names the family of engine — "the web views" —
+    /// that `AppModel` and the engine menu talk about, not whichever page is being scraped
+    /// this minute.
+    public nonisolated let id: String
 
+    /// Which engine the *next* query uses. A query already in flight keeps the engine it
+    /// started with: its page was loaded from that engine's URL, and only that engine's
+    /// script can read it.
+    private var engine: SearchEngine
     private let minInterval: TimeInterval
+    private let jitter: TimeInterval
     private let timeout: TimeInterval
     private let webView: WKWebView
 
-    /// FIFO of not-yet-started searches, each paired with the continuation that `search(_:)`
-    /// is waiting on. Only `pending.first` is ever in flight; `processNext()` pops it, runs
-    /// it, resumes its continuation, and moves on to the next one.
-    private var pending: [(query: String, continuation: CheckedContinuation<[SearchHit], Error>)] = []
+    /// One queued search: the query, the continuation `search(_:)` is waiting on, and a token
+    /// by which a caller that has been cancelled can find its own request again.
+    private struct Request {
+        let token: UUID
+        let query: String
+        let continuation: CheckedContinuation<[SearchHit], Error>
+    }
+
+    /// FIFO of not-yet-started searches. Only one is ever in flight; `processNext()` pops the
+    /// first, runs it, resumes its continuation, and moves on to the next one.
+    private var pending: [Request] = []
+    /// The request `processNext()` is running right now, if any. Held rather than kept purely
+    /// in that task's local scope so a caller that gives up mid-page-load can be resumed
+    /// immediately and the result, when it eventually arrives, dropped.
+    private var inFlight: Request?
     private var isRunning = false
 
-    /// When the last page load started, so `runSearch` can wait out the rest of
-    /// `minInterval` before starting the next one.
+    /// When the last page load started, so `runSearch` can wait out the rest of its
+    /// jittered interval before starting the next one.
     private var lastRun: Date?
 
     /// The continuation `load(_:)` is waiting on for the current navigation's `didFinish`
@@ -39,8 +65,16 @@ public final class WebKitSearchBackend: NSObject, SearchBackend, WKNavigationDel
     /// — resuming that unrelated, still-in-flight continuation with a spurious error.
     private var currentNavigation: WKNavigation?
 
-    public init(minInterval: TimeInterval = 2.5, timeout: TimeInterval = 25) {
+    public init(
+        engine: SearchEngine = .duckduckgo,
+        minInterval: TimeInterval = 2.5,
+        jitter: TimeInterval = 0.7,
+        timeout: TimeInterval = 25
+    ) {
+        self.id = engine.id
+        self.engine = engine
         self.minInterval = minInterval
+        self.jitter = jitter
         self.timeout = timeout
         self.webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 1200, height: 900))
         super.init()
@@ -52,14 +86,55 @@ public final class WebKitSearchBackend: NSObject, SearchBackend, WKNavigationDel
         try await enqueue(query)
     }
 
+    /// Points this web view at another engine, from the next query onwards. Called by
+    /// `SearchPool` when this backend reports a bot wall; the query being answered when that
+    /// happened is finished (badly) on the engine it started on.
+    public func switchEngine(_ engine: SearchEngine) {
+        self.engine = engine
+    }
+
     // MARK: - Queueing
 
+    /// Queues `query` and waits for its turn — or for the caller to be cancelled, which is the
+    /// point of the cancellation handler: a scan that is stopped while N web views each have a
+    /// backlog would otherwise have every queued query run to its 25-second timeout before
+    /// anyone noticed nobody was waiting for it.
     private func enqueue(_ query: String) async throws -> [SearchHit] {
-        try await withCheckedThrowingContinuation { continuation in
-            pending.append((query, continuation))
-            if !isRunning {
-                processNext()
+        let token = UUID()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                // Both this and `cancel(_:)` run on the main actor, and this block runs
+                // without interleaving, so a cancellation landing either side of it is seen:
+                // before, by this check; after, by finding the request in `pending`.
+                guard !Task.isCancelled else {
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
+                pending.append(Request(token: token, query: query, continuation: continuation))
+                if !isRunning {
+                    processNext()
+                }
             }
+        } onCancel: {
+            Task { @MainActor in self.cancel(token) }
+        }
+    }
+
+    /// Resumes a cancelled caller with `CancellationError` and takes its request out of the
+    /// queue, leaving the order of everything still waiting untouched. A no-op for a request
+    /// that has already finished.
+    private func cancel(_ token: UUID) {
+        if let index = pending.firstIndex(where: { $0.token == token }) {
+            let request = pending.remove(at: index)
+            request.continuation.resume(throwing: CancellationError())
+            return
+        }
+        if let running = inFlight, running.token == token {
+            // Its page load can't be unwound from here — the web view is mid-navigation and
+            // the next query will replace it anyway — so the caller is let go now and the
+            // result is dropped when it arrives.
+            inFlight = nil
+            running.continuation.resume(throwing: CancellationError())
         }
     }
 
@@ -69,13 +144,20 @@ public final class WebKitSearchBackend: NSObject, SearchBackend, WKNavigationDel
             return
         }
         isRunning = true
-        let next = pending.removeFirst()
+        let request = pending.removeFirst()
+        inFlight = request
         Task {
+            let result: Result<[SearchHit], Error>
             do {
-                let hits = try await runSearch(next.query)
-                next.continuation.resume(returning: hits)
+                result = .success(try await runSearch(request.query))
             } catch {
-                next.continuation.resume(throwing: error)
+                result = .failure(error)
+            }
+            // A caller that gave up mid-query has already been resumed by `cancel(_:)`, which
+            // cleared `inFlight`; resuming its continuation a second time would trap.
+            if inFlight?.token == request.token {
+                inFlight = nil
+                request.continuation.resume(with: result)
             }
             processNext()
         }
@@ -84,25 +166,29 @@ public final class WebKitSearchBackend: NSObject, SearchBackend, WKNavigationDel
     // MARK: - Search
 
     private func runSearch(_ query: String) async throws -> [SearchHit] {
+        // Jittered so that a pool of these doesn't fall into lockstep and knock on one engine
+        // in bursts of N; see `SearchPool.nextInterval`.
         if let lastRun {
-            let remaining = minInterval - Date().timeIntervalSince(lastRun)
+            let interval = SearchPool.nextInterval(base: minInterval, jitter: jitter)
+            let remaining = interval - Date().timeIntervalSince(lastRun)
             if remaining > 0 {
                 try await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000))
             }
         }
         lastRun = Date()
 
-        guard let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
-              let url = URL(string: "https://duckduckgo.com/?ia=web&q=\(encoded)")
-        else {
-            throw SearchBackendError.transport("could not build DuckDuckGo search URL for query: \(query)")
+        // Read once, so a `switchEngine(_:)` landing mid-query can't have the page loaded
+        // from one engine read back with another's selectors.
+        let engine = self.engine
+        guard let url = engine.url(for: query) else {
+            throw SearchBackendError.transport("could not build \(engine.name) search URL for query: \(query)")
         }
 
         let timeoutSeconds = timeout
         return try await withThrowingTaskGroup(of: [SearchHit].self) { group in
             group.addTask {
                 try await self.load(url)
-                return try await self.pollForResults()
+                return try await self.pollForResults(engine: engine)
             }
             group.addTask {
                 try await Task.sleep(nanoseconds: UInt64(timeoutSeconds * 1_000_000_000))
@@ -143,30 +229,23 @@ public final class WebKitSearchBackend: NSObject, SearchBackend, WKNavigationDel
         }
     }
 
-    private static let pollScript = """
-    JSON.stringify(Array.from(document.querySelectorAll('[data-testid="result"]')).slice(0,10).map(r => ({
-      url: (r.querySelector('a[data-testid="result-title-a"]')||{}).href || null,
-      title: (r.querySelector('a[data-testid="result-title-a"]')||{}).innerText || null,
-      snippet: (r.querySelector('[data-result="snippet"]')||{}).innerText || null })))
-    """
-
-    /// Polls the results script once a second for up to 12 attempts. If no rows ever show up,
-    /// checks the page text for DuckDuckGo's bot-challenge wording (throws `.challenge`) or a
-    /// "no results" message (returns `[]` rather than treating it as a challenge).
-    private func pollForResults() async throws -> [SearchHit] {
+    /// Polls the engine's result script once a second for up to 12 attempts. If no rows ever
+    /// show up, checks the page text for that engine's bot-challenge wording (throws
+    /// `.challenge`) or takes it as a "no results" page (returns `[]` rather than treating it
+    /// as a challenge).
+    private func pollForResults(engine: SearchEngine) async throws -> [SearchHit] {
         for attempt in 0..<12 {
             if attempt > 0 {
                 try await Task.sleep(nanoseconds: 1_000_000_000)
             }
-            if let raw = try await evaluateJS(Self.pollScript),
-               let hits = Self.decodeHits(raw), !hits.isEmpty {
+            if let raw = try await evaluateJS(engine.resultScript),
+               let hits = Self.decodeHits(raw, engine: engine), !hits.isEmpty {
                 return hits
             }
         }
 
         let bodyText = (try await evaluateJS("document.body.innerText")) ?? ""
-        let lowered = bodyText.lowercased()
-        if lowered.contains("challenge") || lowered.contains("bots") {
+        if engine.isChallenge(bodyText) {
             throw SearchBackendError.challenge
         }
         return []
@@ -188,7 +267,10 @@ public final class WebKitSearchBackend: NSObject, SearchBackend, WKNavigationDel
         }
     }
 
-    private static func decodeHits(_ json: String) -> [SearchHit]? {
+    /// Turns the result script's JSON into hits, putting every URL through the engine's
+    /// redirector decoder first: a hit that stays an engine's own `…/ck/a?u=…` link says
+    /// nothing about whose page it is, which is the only thing `SearchProbe` reads a URL for.
+    private static func decodeHits(_ json: String, engine: SearchEngine) -> [SearchHit]? {
         guard let data = json.data(using: .utf8),
               let raw = try? JSONDecoder().decode([RawHit].self, from: data)
         else {
@@ -196,7 +278,11 @@ public final class WebKitSearchBackend: NSObject, SearchBackend, WKNavigationDel
         }
         return raw.compactMap { hit in
             guard let url = hit.url, let title = hit.title else { return nil }
-            return SearchHit(url: url, title: title, snippet: hit.snippet ?? "")
+            return SearchHit(
+                url: engine.destination(of: url),
+                title: title,
+                snippet: hit.snippet ?? ""
+            )
         }
     }
 

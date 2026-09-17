@@ -1,7 +1,12 @@
 import SwiftUI
 import TiesCore
 
-/// Fourth screen of setup: the research itself, running while the user watches it happen.
+/// Fifth screen of setup: the research itself, running while the user watches it happen.
+///
+/// It starts with what this Mac already knows. Before a single page is fetched, the signal
+/// collector reads the sources the user allowed on the Sources step — Contacts, Messages,
+/// WhatsApp, Mail — for the same people, through the same caption (spec §3, §6); the web research
+/// follows, and only it is re-run when the engine or the depth is changed mid-flight.
 ///
 /// The scanner is started here and kept on `WizardState`, so the pause/resume/stop buttons act
 /// on the same actor the stream came from, and is cleared again the moment the stream ends —
@@ -20,6 +25,9 @@ struct ScanView: View {
     @State private var people: [Person] = []
     /// The scan job state per person id, as of the last refresh.
     @State private var jobStates: [String: Job.State] = [:]
+    /// The collect job state per person id. Kept apart from the scan's: the two passes run over
+    /// the same people, and a person whose sources have been read is not thereby researched.
+    @State private var collectStates: [String: Job.State] = [:]
     /// Ids whose scan job has reached a terminal state, so their row can stop shimmering.
     @State private var done: Set<String> = []
     @State private var best: [String: Candidate] = [:]
@@ -33,6 +41,9 @@ struct ScanView: View {
     /// Set by the first progress event of the run, which is what tells the hint below that the
     /// scan is demonstrably alive.
     @State private var started = false
+    /// Set while the local sources are being read, which is the first half of this screen: the
+    /// caption watches the collection until it ends, then the scan.
+    @State private var collecting = false
     /// Shown only when three seconds pass with nothing back from the scanner: the first probe of
     /// the first person can take that long, and a screen with nothing on it but a still bar is
     /// the moment the user starts to wonder whether anything is running.
@@ -55,8 +66,8 @@ struct ScanView: View {
                         .fixedSize()
                     engineMenu
                 }
-                if model.searchRunsOneAtATime {
-                    Text("DuckDuckGo runs one search at a time. Tavily or Exa are several times faster.")
+                if model.usesWebSearchPool {
+                    Text("Web search runs \(model.searchPoolSize) at a time. Tavily or Exa are faster.")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                         .transition(.opacity)
@@ -64,15 +75,19 @@ struct ScanView: View {
             }
             .padding(.horizontal, 20)
             .padding(.bottom, 6)
-            .animation(.snappy, value: model.searchRunsOneAtATime)
+            .animation(.snappy, value: model.usesWebSearchPool)
 
             ProgressCaptionView(
-                progress: state.scanProgress,
-                startedAt: state.scanStartedAt,
+                progress: collecting ? state.collectProgress : state.scanProgress,
+                startedAt: collecting ? state.collectStartedAt : state.scanStartedAt,
+                work: collecting ? .collect : .research,
                 onPause: pause,
                 onResume: resume,
-                onCancel: stop,
-                paused: paused
+                onCancel: collecting ? stopCollecting : stop,
+                paused: paused,
+                // The collector reads a capped slice of a local store per person; there is
+                // nothing long enough to hold, only something to stop.
+                showsPause: !collecting
             )
             .padding(.horizontal, 20)
             .padding(.bottom, 12)
@@ -236,12 +251,54 @@ struct ScanView: View {
             return
         }
 
-        guard state.scanner == nil else { return }
+        guard state.scanner == nil, state.collector == nil else { return }
+
+        await collect()
+        guard !Task.isCancelled, state.step == .scan else { return }
 
         await runUntilDone()
 
         guard !Task.isCancelled, state.step == .scan else { return }
         state.next()
+    }
+
+    /// Reads the sources the user allowed, for the people about to be researched, before any of
+    /// the web work starts: what Messages, WhatsApp and Mail already know about someone is free,
+    /// certain, and makes every search that follows a better one.
+    ///
+    /// Statuses are re-checked first, because Full Disk Access may have been granted — or
+    /// revoked — since the Sources step, and `makeSignalCollector()` builds from what is ready
+    /// right now. A source that is off, missing, or locked is simply not in the run.
+    private func collect() async {
+        await model.sources.refresh()
+
+        let collector = model.makeSignalCollector()
+        state.collector = collector
+        state.collectStartedAt = .now
+        let pending = pendingCollection
+        state.collectProgress = ScanProgress(completed: 0, total: pending.count)
+        collecting = true
+
+        // Whatever ends this — the stream running out, the screen going away, a jump to another
+        // step — leaves the screen saying the same thing: nothing is collecting. Returning out
+        // of the loop without this left the wizard holding a spent collector and the caption
+        // stuck on a pass that had stopped.
+        defer {
+            state.collector = nil
+            collecting = false
+        }
+
+        for await progress in await collector.run(personIds: pending) {
+            guard !Task.isCancelled else { return }
+            state.collectProgress = progress
+            noteFirstEvent()
+        }
+    }
+
+    /// Stops reading the local sources. Whoever is in flight finishes, the stream ends, and the
+    /// research starts without waiting for the rest.
+    private func stopCollecting() {
+        Task { await state.collector?.cancel() }
     }
 
     /// One scanner per pass over the people still to research. Changing the engine stops the
@@ -297,6 +354,13 @@ struct ScanView: View {
         scanOrder.filter { jobStates[$0] != .done }
     }
 
+    /// Who still needs their sources read. The collection keeps its own jobs, so this asks
+    /// those: filtering on the scan's jobs made re-entering Research read Messages and Mail
+    /// again for everyone it had already read them for.
+    private var pendingCollection: [String] {
+        scanOrder.filter { collectStates[$0] != .done }
+    }
+
     private func pause() {
         paused = true
         Task { await state.scanner?.pause() }
@@ -335,10 +399,7 @@ struct ScanView: View {
     /// this event is about. The full map is a statement per person, far too much to run on the
     /// main actor several times a second, so it waits for the end of the run.
     private func refresh(_ progress: ScanProgress) {
-        if !started {
-            started = true
-            withAnimation(.snappy) { showsHint = false }
-        }
+        noteFirstEvent()
         do {
             try refreshJobs()
             noteStage(progress)
@@ -352,6 +413,14 @@ struct ScanView: View {
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    /// The first event of either run is what proves something is happening, and takes the hint
+    /// about what research does back down.
+    private func noteFirstEvent() {
+        guard !started else { return }
+        started = true
+        withAnimation(.snappy) { showsHint = false }
     }
 
     /// Keeps the per-row stage current: the person this event names is on the probe it names,
@@ -369,6 +438,10 @@ struct ScanView: View {
         let jobs = try model.store.jobs(kind: .scan)
         jobStates = Dictionary(
             jobs.map { ($0.personId, $0.state) },
+            uniquingKeysWith: { _, latest in latest }
+        )
+        collectStates = Dictionary(
+            try model.store.jobs(kind: .collect).map { ($0.personId, $0.state) },
             uniquingKeysWith: { _, latest in latest }
         )
         done = Set(

@@ -133,3 +133,22 @@ import Foundation
     #expect(!withLinkedIn.requested.contains { $0.contains("linkedin") })
 }
 
+
+@Test func fetchDirectKeepsLinkedInAndPagesItCannotRead() async throws {
+    let http = FakeHTTP()
+    http.routes = [("sara.dev", 200, try fixture("page", "html"))]
+    let i = input(name: ("Sara", "Ahmed"))
+    let f = await PageFetchProbe().fetchDirect(
+        urls: ["https://sara.dev", "https://www.linkedin.com/in/sara", "https://gone.example"],
+        input: i,
+        client: http
+    )
+
+    // A link the person shared themselves is their identity whether or not its page can be
+    // read, so all three come back — LinkedIn and the dead host without a body.
+    #expect(f.map(\.url) == ["https://sara.dev", "https://linkedin.com/in/sara", "https://gone.example"])
+    #expect(f[0].bodyText?.contains("Acme") == true)
+    #expect(f[1].bodyText == nil)
+    #expect(f[2].bodyText == nil)
+    #expect(!http.requested.contains { $0.contains("linkedin") })
+}

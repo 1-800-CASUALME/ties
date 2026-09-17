@@ -19,8 +19,10 @@ final class AppModel {
         static let hasCompletedSetup = "hasCompletedSetup"
         static let selectedProviderId = "selectedProviderId"
         static let searchBackend = "searchBackend"
+        static let searchPoolSize = "searchPoolSize"
         static let scanMode = "scanMode"
         static let providerConfigPrefix = "providerConfig."
+        static let shareSignals = "ai.shareSignals"
     }
 
     let store: Store
@@ -36,6 +38,9 @@ final class AppModel {
     /// The chosen engine's id: "duckduckgo", "tavily" or "exa". Held as well as written to
     /// `UserDefaults` so the pickers showing it redraw when it changes.
     private(set) var searchBackendId: String
+    /// How many hidden web views the web-search pool runs, 1-4. Held here as well as in
+    /// `UserDefaults` so the stepper in Settings and the hint on the Scan screen agree.
+    private(set) var searchPoolSize: Int
     /// How deeply a scan digs. Quick by default: someone researching hundreds of contacts is
     /// the case that hurts, and thorough is half a minute each. Held here as well as in
     /// `UserDefaults` so the two pickers showing it redraw when either changes it.
@@ -125,9 +130,13 @@ final class AppModel {
         self.embedder = embedder
         self.searchBackend = AppModel.makeSearchBackend(defaults: defaults, client: http)
         self.searchBackendId = defaults.string(forKey: Keys.searchBackend) ?? "duckduckgo"
+        self.searchPoolSize = AppModel.poolSize(defaults: defaults)
         self.scanMode = defaults.string(forKey: Keys.scanMode).flatMap(ScanMode.init(rawValue:)) ?? .quick
         self.setupCompleted = defaults.bool(forKey: Keys.hasCompletedSetup)
         self.providerId = defaults.string(forKey: Keys.selectedProviderId)
+        // Off until the user says otherwise: a missing key means a cloud provider has never
+        // been allowed near the signals collected from this Mac (§7.5).
+        self.signalsShared = defaults.bool(forKey: Keys.shareSignals)
     }
 
     // MARK: - Opening the database
@@ -243,6 +252,9 @@ final class AppModel {
         for task in running {
             task.cancel()
         }
+        // Cancelling the task that started a collection doesn't reach the actor doing the
+        // reading, which owns a task of its own; it has to be told.
+        cancelSettingsCollection()
     }
 
     // MARK: - Erasing everything
@@ -281,11 +293,21 @@ final class AppModel {
         }
         defaults.removeObject(forKey: Keys.selectedProviderId)
         defaults.removeObject(forKey: Keys.searchBackend)
+        defaults.removeObject(forKey: Keys.searchPoolSize)
         defaults.removeObject(forKey: Keys.scanMode)
         defaults.removeObject(forKey: Keys.hasCompletedSetup)
+        defaults.removeObject(forKey: Keys.shareSignals)
+        // The source toggles are part of "everything" too: a fresh start should not remember
+        // which of the user's chats and mail Ties was allowed to read.
+        for key in defaults.dictionaryRepresentation().keys where key.hasPrefix("sources.") {
+            defaults.removeObject(forKey: key)
+        }
 
+        signalsShared = false
+        smartLists = []
         providerId = nil
         searchBackendId = "duckduckgo"
+        searchPoolSize = AppModel.defaultPoolSize
         scanMode = .quick
         searchBackend = AppModel.makeSearchBackend(defaults: defaults, client: http)
         setupCompleted = false
@@ -335,37 +357,106 @@ final class AppModel {
             ))
         }
         probes.append(PageFetchProbe(maxPages: mode.pagesFetched))
-        return ResearchScanner(store: store, probes: probes, client: http, concurrency: scanConcurrency)
+        return ResearchScanner(store: store, probes: probes, client: http, mode: mode, concurrency: scanConcurrency)
     }
 
     /// How many people are researched at once.
     ///
-    /// The web-view engine runs one DuckDuckGo query at a time — that is what the single
-    /// `WKWebView` behind it can do — so people scanned in parallel queue up behind each
-    /// other's searches and more of them buys nothing. Tavily and Exa are HTTP calls that
-    /// genuinely overlap, so a wider batch is a wider batch.
+    /// The web-search pool runs one query per hidden web view, so scanning people two-deep
+    /// per view keeps every view busy without queueing a third query behind each of them.
+    /// Tavily and Exa are HTTP calls that genuinely overlap, so they get a flat six.
     private var scanConcurrency: Int {
-        searchRunsOneAtATime ? 4 : 6
+        usesWebSearchPool ? 2 * searchPoolSize : 6
     }
 
     /// The id of the engine that is actually searching, which is not always
-    /// `searchBackendId`: an engine whose key has gone missing falls back to DuckDuckGo
+    /// `searchBackendId`: an engine whose key has gone missing falls back to the web views
     /// underneath, and anything deciding what the research is really doing has to ask the
     /// backend rather than the saved choice.
+    ///
+    /// The pool reports itself as "pool"; what the engine menu and the pickers mean by
+    /// "DuckDuckGo" is that whole family of hidden web views, so that is what they are told.
     var activeSearchBackendId: String {
-        searchBackend.id
+        searchBackend.id == AppModel.poolBackendId ? AppModel.webBackendId : searchBackend.id
     }
 
-    /// Whether the engine actually in use searches one query at a time.
-    var searchRunsOneAtATime: Bool {
-        activeSearchBackendId == AppModel.serialBackendId
+    /// Whether the research is searching through the pool of hidden web views rather than an
+    /// API engine.
+    var usesWebSearchPool: Bool {
+        searchBackend.id == AppModel.poolBackendId
     }
 
-    /// The id `WebKitSearchBackend` reports.
-    private static let serialBackendId = "duckduckgo"
+    /// The id `SearchPool` reports, and the one the UI calls that pool by.
+    private static let poolBackendId = "pool"
+    private static let webBackendId = "duckduckgo"
 
-    func makeExtractor() throws -> Extractor {
-        Extractor(store: store, provider: try makeProvider(), embedder: embedder)
+    /// The extractor, fact-checking by default (§7.6): a second pass costs one more call per
+    /// person and is what puts the dotted underline under a claim the sources don't back.
+    func makeExtractor(factCheck: Bool = true) throws -> Extractor {
+        Extractor(store: store, provider: try makeProvider(), embedder: embedder, factCheck: factCheck)
+    }
+
+    // MARK: - AI features
+
+    /// Whether a cloud provider may see the signals collected from this Mac — aliases, titles,
+    /// companies, honorifics, and nothing else (§7.5). Off until the user turns it on, and read
+    /// by `makeJudge()` and `makeDrafter()`, which is where the rule is actually applied: the
+    /// on-device model is never gated by it.
+    var shareSignals: Bool {
+        get { signalsShared }
+        set {
+            signalsShared = newValue
+            defaults.set(newValue, forKey: Keys.shareSignals)
+        }
+    }
+
+    /// The smart lists as the sidebar and the Done screen show them. Held here rather than read
+    /// per view because two screens draw them and a refresh started on one has to land on the
+    /// other.
+    private(set) var smartLists: [SmartList] = []
+    /// Whether a regrouping is in flight, so the sidebar's refresh button can say so.
+    private(set) var smartListsRefreshing = false
+
+    private var signalsShared: Bool
+
+    func makeJudge() throws -> CandidateJudge {
+        CandidateJudge(store: store, provider: try makeProvider(), shareSignals: shareSignals)
+    }
+
+    func makeSmartListBuilder() throws -> SmartListBuilder {
+        SmartListBuilder(store: store, provider: try makeProvider())
+    }
+
+    func makeExpander() throws -> QueryExpander {
+        QueryExpander(provider: try makeProvider())
+    }
+
+    func makeDrafter() throws -> MessageDrafter {
+        MessageDrafter(provider: try makeProvider(), shareSignals: shareSignals)
+    }
+
+    /// Re-reads the saved smart lists. Cheap enough for any screen that shows them to call on
+    /// appear, which is how a window opened after a regrouping catches up with it.
+    func loadSmartLists() {
+        smartLists = (try? store.smartLists()) ?? []
+    }
+
+    /// Regroups the network in the background and keeps what comes back — unless nothing does:
+    /// an empty answer replaces nothing, so a refresh the model fumbles (or one with no
+    /// provider configured at all) leaves the lists already on screen alone.
+    ///
+    /// Silent by design. This is the one piece of AI that runs without the user asking for it,
+    /// on the way out of extraction, and a failure there is not worth a dialog about.
+    func refreshSmartLists() {
+        guard !smartListsRefreshing else { return }
+        guard let builder = try? makeSmartListBuilder() else { return }
+        smartListsRefreshing = true
+        track {
+            defer { self.smartListsRefreshing = false }
+            guard let lists = try? await builder.build(), !lists.isEmpty else { return }
+            try? self.store.replaceSmartLists(lists)
+            self.loadSmartLists()
+        }
     }
 
     // MARK: - Provider detection and configuration
@@ -432,8 +523,36 @@ final class AppModel {
         searchBackend = AppModel.makeSearchBackend(defaults: defaults, client: http)
     }
 
-    /// DuckDuckGo via an off-screen web view unless the user picked an API-key backend and
-    /// actually has a key for it.
+    /// Saves how many hidden web views the pool runs and rebuilds the backend around the new
+    /// number, so the next scanner searches through that many. Clamped to 1-4: one is the old
+    /// serial behaviour, and past four the engine notices before the Mac does.
+    func setSearchPoolSize(_ size: Int) {
+        let clamped = min(max(size, 1), AppModel.maxPoolSize)
+        guard clamped != searchPoolSize else { return }
+        defaults.set(clamped, forKey: Keys.searchPoolSize)
+        searchPoolSize = clamped
+        // The same path a changed engine takes: the backend is rebuilt from what is saved,
+        // which is now a pool of `clamped` web views.
+        setSearchBackend(searchBackendId)
+    }
+
+    static let maxPoolSize = 4
+    static let defaultPoolSize = 2
+
+    /// The saved pool size, clamped into range — a `0` from a never-written key means "not
+    /// set", not "no web views".
+    private static func poolSize(defaults: UserDefaults) -> Int {
+        let saved = defaults.integer(forKey: Keys.searchPoolSize)
+        guard saved > 0 else { return defaultPoolSize }
+        return min(saved, maxPoolSize)
+    }
+
+    /// A pool of hidden web views unless the user picked an API-key backend and actually has a
+    /// key for it.
+    ///
+    /// The workers are built here rather than in `TiesCore` because a `WKWebView` is the app's
+    /// to own; the pool itself knows nothing about WebKit, only that it has N things that can
+    /// answer a query and a list of engines to move them onto when one hits a bot wall.
     private static func makeSearchBackend(defaults: UserDefaults, client: any HTTPClient) -> any SearchBackend {
         switch defaults.string(forKey: Keys.searchBackend) {
         case "tavily":
@@ -447,6 +566,65 @@ final class AppModel {
         default:
             break
         }
-        return WebKitSearchBackend()
+
+        let engines = SearchEngine.enabledEngines
+        let first = engines.first ?? .duckduckgo
+        let workers = (0..<poolSize(defaults: defaults)).map { _ in WebKitSearchBackend(engine: first) }
+        return SearchPool(workers: workers, engines: engines)
+    }
+
+    // MARK: - Local sources
+
+    /// Which of this Mac's own sources the user allows, and where each one stands right now.
+    /// Held here because the wizard's Sources step and Settings › Sources show the same four
+    /// rows, and `makeSignalCollector()` builds from exactly what they show.
+    let sources = SourcesModel()
+
+    /// The collection Settings › Sources started, while one is running.
+    ///
+    /// Held here rather than in that pane's `@State` because the Settings window can be closed
+    /// — and rebuilt — while a run is in flight. A `SignalCollector` keeps its own internal
+    /// task, which does not inherit cancellation from whoever started it, so a view-owned
+    /// collector would go on reading Messages and Mail with nobody watching, and the next visit
+    /// to the pane would find an empty `@State` and happily start a second run over the top of
+    /// it.
+    var settingsCollector: SignalCollector?
+
+    /// Stops the Settings collection, if there is one. The pane calls this when it goes away,
+    /// and `cancelAllWork()` calls it before the database is emptied.
+    func cancelSettingsCollection() {
+        guard let collector = settingsCollector else { return }
+        settingsCollector = nil
+        Task { await collector.cancel() }
+    }
+
+    /// The collector over every source worth running for this collection.
+    ///
+    /// Every source has to be switched on, Contacts included: its row draws the same switch as
+    /// the others, and a privacy control that quietly does nothing is worse than one the user
+    /// can turn back on. The file sources have to be `ready` as well — off, not installed, or
+    /// still locked behind Full Disk Access is simply left out, which is how a run stays quiet
+    /// about it instead of failing once per person.
+    ///
+    /// With everything off the collection still runs: each person's signal row is rebuilt from
+    /// no sources at all, which empties it, rather than the pass failing.
+    ///
+    /// Statuses come from the last `sources.refresh()`; the screens that start a collection
+    /// refresh immediately before asking for this.
+    func makeSignalCollector() -> SignalCollector {
+        var collectors: [any SourceCollector] = []
+        for source in SourcesModel.all {
+            guard sources.isEnabled(source.id) else { continue }
+            if source.id == SourcesModel.contactsId {
+                // Contacts has no status to satisfy: it reads what the address book already
+                // wrote into the database, so there is nothing to grant and nothing to open.
+                collectors.append(ContactsCollector(store: store))
+                continue
+            }
+            guard sources.statuses[source.id] == .ready else { continue }
+            guard let collector = SourcesModel.fileCollector(source.id, userNames: sources.userNames) else { continue }
+            collectors.append(collector)
+        }
+        return SignalCollector(store: store, collectors: collectors)
     }
 }

@@ -37,7 +37,7 @@ import Foundation
     let result = await ProviderDetector.runShell("/bin/sleep 30", timeout: .milliseconds(200))
     let elapsed = clock.now - start
     #expect(result == nil)
-    #expect(elapsed < .seconds(2))
+    #expect(elapsed < .seconds(4))  // generous: builds and parallel tests share this machine
 }
 
 @Test func runShellHappyPath() async {

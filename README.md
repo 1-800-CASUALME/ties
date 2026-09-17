@@ -9,7 +9,8 @@ After that you search in plain language: *"who do I know that can help with X"*.
 
 Native macOS 15+, SwiftUI, one local SQLite file, MIT licensed.
 
-> **Screenshots coming** — the wizard and the main window will be shown here once 0.1.0 ships.
+> **Screenshots coming** — the wizard and the main window will be shown here once the 0.2
+> screens are final.
 
 ## Install
 
@@ -33,14 +34,72 @@ Requires macOS 15 or later. Apple Intelligence as a provider needs macOS 26 on a
 4. **Search.** Type a name or a phone fragment to filter, or ask a question and Ties ranks people
    by how well their profile answers it, with the matching phrases highlighted.
 
+## Sources
+
+Ties reads four places on this Mac. Each one is optional and shown as a row on the **Sources** step
+of the wizard and in Settings › Sources, where you can switch any of them off. Nothing is read until
+you grant Full Disk Access, and Contacts needs its own permission.
+
+| Source | What it adds |
+| --- | --- |
+| Contacts | The nickname you saved, the note you wrote, the city on the postal address — other names this person goes by, honorifics, and where they are. |
+| Messages | How other people address them in your chats ("Dr Sara"), group names, links they sent you, when you last talked and how often. |
+| WhatsApp | The display name they set for themselves, group names, links they shared, when you last talked and how often. |
+| Mail | The signature block under their own mail — title, company, phone, website, LinkedIn — and when you last wrote. |
+
+Contacts needs nothing extra. Messages, WhatsApp and Mail live behind Full Disk Access:
+
+1. On the Sources step, or in Settings › Sources, click **Open Privacy Settings**.
+2. In Privacy & Security › Full Disk Access, switch **Ties** on. macOS may ask to quit and reopen it.
+3. Back in Ties, the rows turn green. Continue works either way — a source that is off simply
+   contributes nothing.
+
+Ties never opens the live chat or mail store. It copies the file to a temporary folder, opens the
+copy read-only, reads at most the last 500 messages a person and the 50 most recent mails an
+address, and deletes the copy when the pass ends. Nothing is written back to Messages, WhatsApp,
+Mail or Contacts. What is read stays on this Mac except where the Privacy section says otherwise.
+Revoke Full Disk Access whenever you like; Ties carries on with what the web says.
+
+## AI
+
+AI sits where an assistant would sit, never in front of you. Everything it produces carries a small
+sparkle, can be dismissed, and runs through the provider you chose — on-device first.
+
+- **Judge.** When a person has more than one plausible match, the provider reads the evidence and
+  says which one, in a line. You still click.
+- **Smart lists.** Your network grouped in the sidebar — Doctors, Founders, Engineers in Riyadh —
+  built after extraction, rebuilt on demand.
+- **Ask, better.** "Help with taxes" is expanded into accountant, CPA, tax advisor, bookkeeper,
+  shown as chips under the field. Remove a chip and the search forgets that term.
+- **Draft.** Say what you need; Ties writes a short message in your own register, learned from your
+  last twenty messages to that person, and opens Messages, WhatsApp or Mail with it prefilled. The
+  sample reaches a cloud provider only with the privacy switch on. Nothing is sent by Ties.
+- **Reconnect.** People whose profile answers what you are looking for and who you have not talked
+  to in three months, strongest tie first.
+- **Fact check.** Every extracted fact is re-checked against the pages it came from; the ones those
+  pages do not support get a dotted underline instead of your trust.
+
+Settings › Providers holds one switch: **Let cloud AI see local signals**, off by default. Off, a
+cloud provider sees only public pages and what Apple Contacts holds. On, it also sees the aliases,
+titles, companies and honorifics collected from your Mac, and — when you ask for a draft — your own
+last twenty messages to that person, so the draft sounds like you. It never sees a message someone
+sent you, a subject line, or your address book. Apple Intelligence runs on this Mac and is never
+gated. The switch shows as a lock next to the provider tile.
+
 ## How long does research take?
 
-Quick — the default — is about 5–10 seconds a person with DuckDuckGo, and faster with a Tavily
-or Exa key, since those search several people at once instead of one query at a time. Thorough
-is around 30 seconds a person: four searches, forty username sites and every page it can reach.
-Switch between them with the hare and the tortoise on the research screen, or in Settings ›
+Quick — the default — is about 5–10 seconds a person on the built-in engines, and faster with a
+Tavily or Exa key, since those search several people at once instead of one query at a time.
+Thorough is around 30 seconds a person: four searches, forty username sites and every page it can
+reach. Switch between them with the hare and the tortoise on the research screen, or in Settings ›
 Research. Nothing is lost either way — you can leave a long run going, pause it, or change depth
 or engine half way through, and whoever has already been researched stays researched.
+
+Without a key, Ties searches in hidden web views — two at once by default, up to four in Settings ›
+Research, each pacing itself. Two engines are scraped: DuckDuckGo first, then Yahoo. When one of
+them starts asking a view to prove it is not a robot, that view moves to the other engine for ten
+minutes instead of waiting. Quick mode also caps a person at 25 seconds, and skips the search
+altogether when a link the person shared already says who they are.
 
 ## Providers
 
@@ -87,6 +146,23 @@ person's name, company, title and email addresses are sent to the AI provider yo
 key — or stay on this Mac with Apple Intelligence. Any person, fact, or the whole database can be
 deleted instantly. Ties prefers official APIs and search snippets, fetches public pages one at a
 time, never logs in anywhere, and never writes to Apple Contacts.
+
+What Ties learns from your chats and mail stays on this Mac, with two deliberate exceptions, both
+of which are the feature working. First, searching: a name, an employer, a job title or another
+name someone goes by can appear in a web search, the same way a contact's name and company already
+did in 0.1 — that is how a person is found at all. Second, the AI: with "Let cloud AI see local
+signals" switched off, a cloud provider is sent only what your address book already held; switch it
+on and it also sees aliases, titles, companies and honorifics, plus — only when you ask for a draft
+— your own last twenty messages to that person. It is never sent a message anyone sent you, a
+subject line, or your address book, and Apple Intelligence on this Mac sends nothing anywhere. Ties opens your Messages, WhatsApp and Mail stores read-only, from a temporary copy, and
+never modifies them. Full Disk Access can be revoked at any time; Ties keeps working with what the
+web says.
+
+## What's next
+
+0.3 is being planned in the open. The roadmap post for this release, and the discussion of what
+comes after it, is
+[Ties 0.2: your Mac already knows who they are](https://github.com/1-800-CASUALME/ties/discussions/1).
 
 ## Build from source
 

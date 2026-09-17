@@ -30,6 +30,13 @@ struct PeopleListView: View {
     /// cancellation alone doesn't cover it, because a run that has already finished its `ask`
     /// can't be cancelled out of writing what it found.
     @State private var askGeneration = 0
+    /// The provider's expansion of the current question (§7.3): the words a matching profile
+    /// would actually use. Shown as chips under the field, and removable — a term the user
+    /// takes off is a term the next search doesn't look for.
+    @State private var expansion: [String] = []
+    /// The exact question `expansion` was produced for, so pressing Return on text that has
+    /// just been expanded doesn't ask the provider the same thing twice.
+    @State private var expandedQuery: String?
     @State private var errorMessage: String?
 
     private enum Mode {
@@ -52,7 +59,60 @@ struct PeopleListView: View {
         .searchable(text: $query, placement: .toolbar, prompt: "Search or ask…")
         .onSubmit(of: .search) { runAsk(debounced: false) }
         .onChange(of: query) { _, text in queryChanged(text) }
+        .safeAreaInset(edge: .top) { expansionChips }
         .safeAreaInset(edge: .bottom) { bottomBar }
+    }
+
+    // MARK: - Expansion chips
+
+    /// The expansion terms under the search field. Taking one off searches again without it —
+    /// with the terms that are left, and without asking the provider a second time: the user
+    /// has just told us what they think of its answer.
+    @ViewBuilder
+    private var expansionChips: some View {
+        if mode == .ask, !expansion.isEmpty {
+            ScrollView(.horizontal) {
+                HStack(spacing: 6) {
+                    Image(systemName: "sparkle")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .help("Words the AI added to your question")
+                    ForEach(expansion, id: \.self) { term in
+                        chip(term)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+            }
+            .scrollIndicators(.never)
+            .background(.bar)
+            .animation(.snappy, value: expansion)
+        }
+    }
+
+    private func chip(_ term: String) -> some View {
+        HStack(spacing: 4) {
+            Text(term)
+                .lineLimit(1)
+            Button {
+                remove(term)
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.caption2)
+            }
+            .buttonStyle(.borderless)
+            .help("Search without \(term)")
+            .accessibilityLabel("Remove \(term)")
+        }
+        .font(.caption)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
+        .background(Capsule().fill(.quaternary.opacity(0.6)))
+    }
+
+    private func remove(_ term: String) {
+        expansion.removeAll { $0 == term }
+        runAsk(debounced: false, expand: false)
     }
 
     // MARK: - Filter mode
@@ -178,6 +238,8 @@ struct PeopleListView: View {
         searching = false
         submitted = false
         results = []
+        expansion = []
+        expandedQuery = nil
         errorMessage = nil
     }
 
@@ -185,7 +247,10 @@ struct PeopleListView: View {
     /// would otherwise start a fused keyword-and-embedding search over the whole store, and the
     /// answer to half a word is worth nothing. Return means the user has finished typing and
     /// runs immediately.
-    private func runAsk(debounced: Bool) {
+    ///
+    /// `expand` is false for the one case that must not ask the provider again: a chip the user
+    /// removed. Everything else is a new question, and gets a new expansion.
+    private func runAsk(debounced: Bool, expand: Bool = true) {
         askTask?.cancel()
         askGeneration += 1
         let generation = askGeneration
@@ -197,6 +262,8 @@ struct PeopleListView: View {
             askTask = nil
             searching = false
             results = []
+            expansion = []
+            expandedQuery = nil
             errorMessage = nil
             return
         }
@@ -205,13 +272,33 @@ struct PeopleListView: View {
         searching = true
         errorMessage = nil
         let search = model.search
+        // Return on text that has already been expanded — which is what pressing it after
+        // typing past a `?` does — searches again rather than paying for the same expansion a
+        // second time.
+        let alreadyExpanded = text == expandedQuery
+        let expander = (expand && !alreadyExpanded) ? try? model.makeExpander() : nil
+        // The old chips stay up until the new ones arrive: clearing them here made the strip
+        // flash empty on every keystroke of a question that is still being typed.
+        if expander == nil, expand, !alreadyExpanded {
+            expansion = []
+            expandedQuery = nil
+        }
         askTask = model.track {
             if debounced {
                 try? await Task.sleep(for: .milliseconds(350))
                 guard !Task.isCancelled, generation == askGeneration else { return }
             }
+            // The expander races its own two-second clock inside `TiesCore` and returns no
+            // terms rather than throwing, so a slow or missing provider costs the answer
+            // nothing but those two seconds.
+            if let expander {
+                let terms = (try? await expander.expand(text)) ?? []
+                guard !Task.isCancelled, generation == askGeneration else { return }
+                expansion = terms
+                expandedQuery = text
+            }
             do {
-                let hits = try await search.ask(text, limit: 50)
+                let hits = try await search.ask(text, limit: 50, terms: expansion)
                 guard !Task.isCancelled, generation == askGeneration else { return }
                 results = hits
                 errorMessage = nil

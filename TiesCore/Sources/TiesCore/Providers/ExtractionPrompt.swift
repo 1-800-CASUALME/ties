@@ -9,7 +9,8 @@ public enum ExtractionPrompt {
         Output only JSON matching the schema. Never invent. Leave fields empty when unsure. \
         canHelpWith: up to 8 short lowercase tags of skills/domains this person could help someone with. \
         summary: at most two sentences. \
-        Ignore text about other people with the same name unless the context clearly matches the known facts.
+        Ignore text about other people with the same name unless the context clearly matches the known facts. \
+        \(AIPrompts.untrustedMaterial)
         """
 
     /// A one-line prompt used by `validate()`: enough to prove the provider answers with

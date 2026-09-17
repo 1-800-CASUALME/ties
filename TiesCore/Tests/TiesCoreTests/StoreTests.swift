@@ -59,6 +59,23 @@ private func makeStore() throws -> Store { try Store.inMemory() }
     #expect(try s.evidence(candidateId: c1.id).count == 1)
 }
 
+@Test func pagesComeBackInAFixedOrder() throws {
+    let s = try makeStore()
+    let p = Person(givenName: "Tim", familyName: "Cook")
+    try s.upsertPeople([p], channels: [])
+    let c = Candidate(personId: p.id, score: 3, status: .pending, primaryURL: "https://a")
+    // Inserted in the reverse of the order they should come back in.
+    try s.replaceCandidates(personId: p.id, candidates: [c], evidence: [], pages: [
+        SourcePage(id: "z", candidateId: c.id, url: "https://z", kind: .serp),
+        SourcePage(id: "a", candidateId: c.id, url: "https://a", kind: .serp),
+        SourcePage(id: "m", candidateId: c.id, url: "https://m", kind: .page),
+    ])
+    // Kind then id: the fetched page before the search results, and no reliance on rowid —
+    // callers that quote only the first few pages (the candidate judge quotes two) must get
+    // the same ones every run.
+    #expect(try s.pages(candidateId: c.id).map(\.id) == ["m", "a", "z"])
+}
+
 @Test func profileFTSAndNotes() throws {
     let s = try makeStore()
     let p = Person(givenName: "Sara", familyName: "Ahmed")

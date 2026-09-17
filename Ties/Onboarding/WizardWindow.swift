@@ -44,6 +44,8 @@ struct WizardWindow: View {
             WelcomeView()
         case .access:
             AccessView()
+        case .sources:
+            SourcesView()
         case .select:
             SelectView()
         case .provider:
@@ -110,23 +112,28 @@ struct WizardWindow: View {
     /// and writing candidates long after the screen that asked for them is gone.
     private func cancel() {
         let scanner = state.scanner
+        let collector = state.collector
         let extractor = state.extractor
         state.scanner = nil
+        state.collector = nil
         state.extractor = nil
         Task {
             await scanner?.cancel()
+            await collector?.cancel()
             await extractor?.cancel()
         }
         model.resumeWizardStep = nil
         model.hasCompletedSetup = true
     }
 
-    /// No way back out of the first screen, and none out of a step that is already doing
-    /// work or has finished it. Review is in that company: the research behind it has already
-    /// run, and the screen has its own per-person re-run for anything that needs another look.
+    /// No way back out of the first screen, and none out of a step that is already doing work
+    /// or has finished it. The AI step is in that company for a different reason: the screen
+    /// behind it is the finished research, which would push straight forward again, so a Back
+    /// button there would look broken. Review, on the other hand, backs into the AI step, which
+    /// is exactly where someone unhappy with the matches goes to change the model.
     private var showsBack: Bool {
         switch state.step {
-        case .welcome, .scan, .review, .extract, .done: false
+        case .welcome, .scan, .provider, .extract, .done: false
         default: true
         }
     }

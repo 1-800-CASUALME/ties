@@ -1,7 +1,7 @@
 import SwiftUI
 import TiesCore
 
-/// Seventh screen of setup: the AI reading everything the scan collected and writing one
+/// Eighth screen of setup: the AI reading everything the scan collected and writing one
 /// profile per person, watched as it happens.
 ///
 /// The twin of `ScanView`, with three differences. The extractor can only be stopped, never
@@ -82,7 +82,9 @@ struct ExtractView: View {
                 Label(errorMessage, systemImage: "exclamationmark.triangle")
                     .foregroundStyle(.red)
                 if providerFailed {
-                    Button("Choose a different AI") { state.back() }
+                    // The AI step is two back now that it comes before Review, so this jumps
+                    // rather than stepping: Review is not where a broken provider is fixed.
+                    Button("Choose a different AI") { state.jump(to: .provider) }
                         .controlSize(.large)
                 }
             }
@@ -158,7 +160,7 @@ struct ExtractView: View {
 
         let extractor: Extractor
         do {
-            extractor = try model.makeExtractor()
+            extractor = try model.makeExtractor(factCheck: true)
         } catch {
             errorMessage = "Couldn't start the AI. \(describe(error))"
             providerFailed = true
@@ -176,6 +178,12 @@ struct ExtractView: View {
         // Cleared whether the run finished on its own or the user stopped it, so a later visit
         // can tell a spent extractor from one still working.
         state.extractor = nil
+
+        // The one piece of AI that runs without being asked (§7.2): there are new profiles to
+        // group by, and the sidebar the user is about to see is where the groups land. It is
+        // the model's own task, so it survives this screen going away, and it says nothing if
+        // it fails.
+        model.refreshSmartLists()
 
         // The step check is not redundant: a screen being pushed off is still alive (and its
         // task still running) for the length of the transition, so a run that ends in that
@@ -197,6 +205,9 @@ struct ExtractView: View {
 
             guard extractOrder.allSatisfy(done.contains) else { continue }
             state.extractor = nil
+            // The same regrouping the run's own loop does when it ends: this path is the one
+            // where that loop went away with the view that started it, so nobody else will.
+            model.refreshSmartLists()
             state.next()
             return
         }
