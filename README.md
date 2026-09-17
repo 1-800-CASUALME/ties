@@ -36,8 +36,9 @@ Requires macOS 15 or later. Apple Intelligence as a provider needs macOS 26 on a
 
 ## Sources
 
-Ties reads four places on this Mac. Each one is optional, off until you turn it on, and shown as a
-row on the **Sources** step of the wizard and in Settings › Sources.
+Ties reads four places on this Mac. Each one is optional and shown as a row on the **Sources** step
+of the wizard and in Settings › Sources, where you can switch any of them off. Nothing is read until
+you grant Full Disk Access, and Contacts needs its own permission.
 
 | Source | What it adds |
 | --- | --- |
@@ -144,11 +145,16 @@ key — or stay on this Mac with Apple Intelligence. Any person, fact, or the wh
 deleted instantly. Ties prefers official APIs and search snippets, fetches public pages one at a
 time, never logs in anywhere, and never writes to Apple Contacts.
 
-Local signals never leave this Mac unless you turn on "Let cloud AI see local signals", and even
-then only aliases, titles, companies and honorifics are sent — never a message, a subject line, or
-an address book. Ties opens your Messages, WhatsApp and Mail stores read-only, from a temporary
-copy, and never modifies them. Full Disk Access can be revoked at any time; Ties keeps working
-with what the web says.
+What Ties learns from your chats and mail stays on this Mac, with two deliberate exceptions, both
+of which are the feature working. First, searching: a name, an employer, a job title or another
+name someone goes by can appear in a web search, the same way a contact's name and company already
+did in 0.1 — that is how a person is found at all. Second, the AI: with "Let cloud AI see local
+signals" switched off, a cloud provider is sent only what your address book already held; switch it
+on and it also sees aliases, titles, companies and honorifics. Either way it is never sent a
+message, a subject line, or your address book, and Apple Intelligence on this Mac sends nothing
+anywhere. Ties opens your Messages, WhatsApp and Mail stores read-only, from a temporary copy, and
+never modifies them. Full Disk Access can be revoked at any time; Ties keeps working with what the
+web says.
 
 ## What's next
 
