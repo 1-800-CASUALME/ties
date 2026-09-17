@@ -276,3 +276,82 @@ struct CountingProbe: Probe {
 
     #expect(await searches.count == 1)
 }
+
+// MARK: - The per-person budget (spec §5)
+
+/// A probe that takes longer than the person's budget, and counts whether it ever finished.
+struct SlowProbe: Probe {
+    let id: String
+    let delay: Duration
+    let finished: CallCounter
+    func run(_ input: ProbeInput, client: any HTTPClient) async throws -> [ProbeFinding] {
+        try await Task.sleep(for: delay)
+        await finished.increment()
+        return []
+    }
+}
+
+private func emailHashFinding(_ url: String) -> ProbeFinding {
+    ProbeFinding(url: url, displayName: nil, headline: nil, company: nil, location: nil, avatarURL: nil,
+                 username: nil, pageTitle: nil, snippet: nil, bodyText: nil, pageKind: .serp,
+                 evidence: [EvidenceItem(kind: .emailHash, weight: 8, detail: "", sourceURL: nil)], linkedURLs: [])
+}
+
+@Test func aPersonsBudgetStopsTheProbesAndScoresWhatCameBack() async throws {
+    let store = try Store.inMemory()
+    let sara = Person(givenName: "Sara", familyName: "Ahmed")
+    try store.upsertPeople([sara], channels: [])
+
+    let stuck = CallCounter()
+    let never = CallCounter()
+    let probes: [any Probe] = [
+        StaticProbe(id: "fast", findings: [emailHashFinding("https://site/fast")], failFor: nil),
+        SlowProbe(id: "stuck", delay: .seconds(30), finished: stuck),
+        SlowProbe(id: "never", delay: .seconds(30), finished: never),
+    ]
+    let scanner = Scanner(
+        store: store, probes: probes, client: FakeHTTP(), concurrency: 1,
+        perPersonBudget: .seconds(1)
+    )
+
+    let clock = ContinuousClock()
+    let start = clock.now
+    for await _ in await scanner.run(personIds: [sara.id]) {}
+    let elapsed = clock.now - start
+
+    // The budget, not the probe that would have taken half a minute, decided when to stop.
+    #expect(elapsed < .seconds(10))
+    await #expect(stuck.count == 0)
+    await #expect(never.count == 0)
+
+    // What the probes that did finish found is scored and written, rather than thrown away.
+    #expect(try store.candidates(personId: sara.id).first?.status == .auto)
+
+    // The person is done, not failed, and the job says which probes never got their turn.
+    let job = try #require(try store.jobs(kind: .scan).first { $0.personId == sara.id })
+    #expect(job.state == .done)
+    let error = try #require(job.error)
+    #expect(error.contains("stuck: budget exceeded"))
+    #expect(error.contains("never: budget exceeded"))
+    #expect(!error.contains("fast:"))
+}
+
+@Test func quickCapsAPersonAtTwentyFiveSecondsAndThoroughDoesNot() async throws {
+    #expect(ScanMode.quick.perPersonBudget == .seconds(25))
+    #expect(ScanMode.thorough.perPersonBudget == nil)
+
+    // With no cap, a probe slower than any quick budget still runs to completion.
+    let store = try Store.inMemory()
+    let sara = Person(givenName: "Sara", familyName: "Ahmed")
+    try store.upsertPeople([sara], channels: [])
+    let done = CallCounter()
+    let scanner = Scanner(
+        store: store,
+        probes: [SlowProbe(id: "slow", delay: .milliseconds(50), finished: done)],
+        client: FakeHTTP(), mode: .thorough, concurrency: 1
+    )
+    for await _ in await scanner.run(personIds: [sara.id]) {}
+
+    await #expect(done.count == 1)
+    #expect(try store.jobs(kind: .scan).first { $0.personId == sara.id }?.error == nil)
+}

@@ -23,6 +23,11 @@ public actor Scanner {
     /// How long to back off after a `SearchBackendError.challenge` before retrying the probe
     /// once. An `init` parameter (rather than a hardcoded 300s) so tests can shorten it.
     private let challengeBackoff: Duration
+    /// The wall clock one person gets before the rest of their probes are given up on (spec
+    /// §5). `nil` means no cap. Defaults to the mode's own budget; an `init` parameter so tests
+    /// can shorten it to something a test can wait out.
+    private let perPersonBudget: Duration?
+    private let clock = ContinuousClock()
 
     private var paused = false
     private var cancelled = false
@@ -46,7 +51,8 @@ public actor Scanner {
         weights: ScoringWeights = .default,
         mode: ScanMode = .thorough,
         concurrency: Int = 4,
-        challengeBackoff: Duration = .seconds(60)
+        challengeBackoff: Duration = .seconds(60),
+        perPersonBudget: Duration? = nil
     ) {
         self.store = store
         self.probes = probes
@@ -55,6 +61,7 @@ public actor Scanner {
         self.mode = mode
         self.concurrency = concurrency
         self.challengeBackoff = challengeBackoff
+        self.perPersonBudget = perPersonBudget ?? mode.perPersonBudget
     }
 
     /// Starts scanning `personIds` and returns immediately with a stream of progress events.
@@ -227,6 +234,9 @@ public actor Scanner {
             let channels = try store.channels(personId: personId)
             let signals = try? store.signals(personId: personId)
             let probeInput = ProbeInput(person: person, channels: channels, signals: signals)
+            // A local binding, because the closures the budget runs the probes in are
+            // `@Sendable` and may not capture the actor implicitly.
+            let client = self.client
 
             var findings: [ProbeFinding] = []
             var errors: [String] = []
@@ -244,6 +254,20 @@ public actor Scanner {
             // fetched directly rather than hoped for in a search result. In quick mode that
             // makes the web search redundant — the expensive probe skipped for the one case
             // where its answer is already known.
+            // Whatever the probes have found when the person's wall clock runs out is what
+            // gets scored (spec §5). The deadline is the person's, not the run's: every person
+            // gets the same budget however slow the one before them was.
+            let deadline = perPersonBudget.map { clock.now.advanced(by: $0) }
+            var budgetSpent = false
+
+            /// Everything from `position` on never got its turn.
+            func recordBudgetExceeded(from position: Int) {
+                budgetSpent = true
+                for probe in probes[position...] {
+                    errors.append("\(probe.id): budget exceeded")
+                }
+            }
+
             let selfLinks = (signals?.links ?? []).filter(Scanner.isCandidateWorthy)
             let skipSearch = mode == .quick && !selfLinks.isEmpty
             if !selfLinks.isEmpty {
@@ -255,11 +279,19 @@ public actor Scanner {
                     stage: pageProbe.displayName, finishedStages: finishedStages,
                     notice: skippedProbes.isEmpty ? nil : Scanner.searchSkippedNotice
                 ))
-                findings += await pageProbe.fetchDirect(urls: selfLinks, input: probeInput, client: client)
-                finishStage(pageProbe.displayName)
+                do {
+                    findings += try await withinBudget(deadline) {
+                        await pageProbe.fetchDirect(urls: selfLinks, input: probeInput, client: client)
+                    }
+                    finishStage(pageProbe.displayName)
+                } catch is BudgetExceeded {
+                    recordBudgetExceeded(from: 0)
+                } catch {
+                    errors.append("\(pageProbe.id): \(error)")
+                }
             }
 
-            for probe in probes {
+            for (position, probe) in probes.enumerated() where !budgetSpent {
                 if skipSearch, probe.id == "search" {
                     continue
                 }
@@ -273,10 +305,12 @@ public actor Scanner {
                     notice: skippedProbes.isEmpty ? nil : Scanner.searchSkippedNotice
                 ))
                 do {
-                    let result = try await probe.run(probeInput, client: client)
+                    let result = try await withinBudget(deadline) { try await probe.run(probeInput, client: client) }
                     findings.append(contentsOf: result)
                     challenges[probe.id] = 0
                     finishStage(probe.displayName)
+                } catch is BudgetExceeded {
+                    recordBudgetExceeded(from: position)
                 } catch SearchBackendError.challenge {
                     challenges[probe.id, default: 0] += 1
                     if challenges[probe.id, default: 0] >= maxChallenges {
@@ -297,10 +331,12 @@ public actor Scanner {
                     await sleepUnlessCancelled(challengeBackoff)
                     if !cancelled {
                         do {
-                            let retryResult = try await probe.run(probeInput, client: client)
+                            let retryResult = try await withinBudget(deadline) { try await probe.run(probeInput, client: client) }
                             findings.append(contentsOf: retryResult)
                             challenges[probe.id] = 0
                             finishStage(probe.displayName)
+                        } catch is BudgetExceeded {
+                            recordBudgetExceeded(from: position)
                         } catch {
                             errors.append("\(probe.id): \(error)")
                             if case SearchBackendError.challenge = error {
@@ -316,9 +352,11 @@ public actor Scanner {
                     await sleepUnlessCancelled(.seconds(clampedRetryAfter))
                     if !cancelled {
                         do {
-                            let retryResult = try await probe.run(probeInput, client: client)
+                            let retryResult = try await withinBudget(deadline) { try await probe.run(probeInput, client: client) }
                             findings.append(contentsOf: retryResult)
                             finishStage(probe.displayName)
+                        } catch is BudgetExceeded {
+                            recordBudgetExceeded(from: position)
                         } catch {
                             errors.append("\(probe.id): \(error)")
                         }
@@ -337,11 +375,42 @@ public actor Scanner {
                 evidence: scored.flatMap(\.evidence),
                 pages: scored.flatMap(\.pages)
             )
-            try store.setJob(kind: .scan, personId: personId, state: .done)
+            try store.setJob(
+                kind: .scan, personId: personId, state: .done,
+                error: errors.isEmpty ? nil : errors.joined(separator: "; ")
+            )
         } catch {
             try? store.setJob(kind: .scan, personId: personId, state: .failed, error: "\(error)")
         }
 
         return displayName
+    }
+
+    // MARK: - The per-person budget
+
+    /// Thrown when a person's wall-clock budget runs out: the probe in flight is cancelled, no
+    /// further one is started, and what has been collected is scored.
+    private struct BudgetExceeded: Error {}
+
+    /// Runs `work` under the person's remaining budget, cancelling it and throwing
+    /// `BudgetExceeded` if the deadline arrives first. With no deadline the work simply runs.
+    private func withinBudget<T: Sendable>(
+        _ deadline: ContinuousClock.Instant?,
+        _ work: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        guard let deadline else { return try await work() }
+        let remaining = clock.now.duration(to: deadline)
+        guard remaining > .zero else { throw BudgetExceeded() }
+
+        return try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask { try await work() }
+            group.addTask {
+                try await Task.sleep(for: remaining)
+                throw BudgetExceeded()
+            }
+            defer { group.cancelAll() }
+            // The first of the two to finish decides: the work's own result, or the clock.
+            return try await group.next()!
+        }
     }
 }
