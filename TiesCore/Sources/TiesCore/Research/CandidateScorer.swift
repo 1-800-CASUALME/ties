@@ -326,12 +326,29 @@ public enum CandidateScorer {
         return ScoredCandidate(candidate: candidate, evidence: evidence, pages: pages)
     }
 
-    /// Passes when any finding's `displayName` is a plausible match for any name the contact
-    /// goes by (the one in Contacts or an alias the local signals collected), or any finding
-    /// carries `.emailHash` evidence (a hashed-identity match is proof enough on its own), or any
-    /// finding's body text mentions the contact's name.
+    /// The aliases that may decide identity: the ones somebody deliberately attached to this
+    /// person (`strongAliases` — their own WhatsApp push name, the nickname on their contact
+    /// card), plus any other alias that shares a word with the name Contacts has for them.
+    ///
+    /// The rest come out of group chats, where "a capitalised 1–3 word name recurring near a
+    /// mention of the contact" is satisfied all day long by the other members' own names. Those
+    /// are chips; letting one through here admitted a stranger's profile as the contact and paid
+    /// it `.selfName` for the privilege.
+    private static func identityAliases(_ input: ProbeInput) -> [String] {
+        guard let signals = input.signals else { return [] }
+        let selfSet = Set(signals.strongAliases.map(NameMatcher.normalize))
+        let nameTokens = Set(tokens(input.fullName))
+        return signals.aliases.filter { alias in
+            selfSet.contains(NameMatcher.normalize(alias)) || !nameTokens.isDisjoint(with: Set(tokens(alias)))
+        }
+    }
+
+    /// Passes when any finding's `displayName` is a plausible match for a name the contact goes
+    /// by that is theirs to go by (see `identityAliases`), or any finding carries `.emailHash`
+    /// evidence (a hashed-identity match is proof enough on its own), or any finding's body text
+    /// mentions the contact's name.
     private static func passesNameGate(_ group: [ProbeFinding], input: ProbeInput) -> Bool {
-        let names = input.aliases
+        let names = [input.fullName] + identityAliases(input)
         let nameMatches = group.contains { finding in
             guard let name = finding.displayName else { return false }
             return names.contains { NameMatcher.similarity(personName: $0, candidateName: name) >= NameMatcher.gate }
@@ -393,9 +410,11 @@ public enum CandidateScorer {
 
     /// The first alias the person actually goes by that this candidate's display name matches.
     /// An alias that is just the Contacts name again doesn't count — a candidate matching that
-    /// is what `.name` evidence is for.
+    /// is what `.name` evidence is for — and neither does one harvested from a group chat that
+    /// nothing ties to this person (see `identityAliases`): +2.0 for going by a name is for
+    /// going by *their* name.
     private static func matchingAlias(_ displayName: String, input: ProbeInput) -> String? {
-        input.signals?.aliases.first { alias in
+        identityAliases(input).first { alias in
             NameMatcher.similarity(personName: input.fullName, candidateName: alias) < NameMatcher.gate
                 && NameMatcher.similarity(personName: alias, candidateName: displayName) >= NameMatcher.gate
         }

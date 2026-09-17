@@ -7,6 +7,14 @@ public struct LocalSignals: Codable, Hashable, Sendable {
     public var personId: String
     /// Other names the person goes by: nickname, WhatsApp push name, the name used in chats.
     public var aliases: [String]
+    /// The subset of `aliases` somebody deliberately attached to *this* person: the name they
+    /// set on their own WhatsApp account, the nickname the user typed on their contact card.
+    ///
+    /// The rest are harvested out of chat text, where a capitalised word near a mention of the
+    /// person is as likely to be another member of the group. Those are good enough for a
+    /// "known as" chip; only these are good enough to admit a web profile as this person or to
+    /// credit it for going by their name (spec §4.2 wrote the chat rule as a source of chips).
+    public var strongAliases: [String]
     /// The canonical ids (`"dr"`, `"eng"`, `"prof"`) of how other people address them, so a
     /// chat reading "Eng. Sara" and a signature reading "Engineer" are one signal.
     public var honorifics: [String]
@@ -35,6 +43,7 @@ public struct LocalSignals: Codable, Hashable, Sendable {
     public init(
         personId: String,
         aliases: [String] = [],
+        strongAliases: [String] = [],
         honorifics: [String] = [],
         honorificsAsWritten: [String] = [],
         titles: [String] = [],
@@ -50,6 +59,7 @@ public struct LocalSignals: Codable, Hashable, Sendable {
     ) {
         self.personId = personId
         self.aliases = aliases
+        self.strongAliases = strongAliases
         self.honorifics = honorifics
         self.honorificsAsWritten = honorificsAsWritten
         self.titles = titles
@@ -71,6 +81,7 @@ public struct LocalSignals: Codable, Hashable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         personId = try container.decodeIfPresent(String.self, forKey: .personId) ?? ""
         aliases = try container.decodeIfPresent([String].self, forKey: .aliases) ?? []
+        strongAliases = try container.decodeIfPresent([String].self, forKey: .strongAliases) ?? []
         honorifics = try container.decodeIfPresent([String].self, forKey: .honorifics) ?? []
         honorificsAsWritten = try container.decodeIfPresent([String].self, forKey: .honorificsAsWritten) ?? []
         titles = try container.decodeIfPresent([String].self, forKey: .titles) ?? []
@@ -115,6 +126,7 @@ public struct LocalSignals: Codable, Hashable, Sendable {
     public func merged(with other: LocalSignals) -> LocalSignals {
         var result = self
         result.aliases = Self.union(aliases, other.aliases)
+        result.strongAliases = Self.union(strongAliases, other.strongAliases)
         result.honorifics = Self.union(honorifics, other.honorifics)
         result.honorificsAsWritten = Self.union(honorificsAsWritten, other.honorificsAsWritten)
         result.titles = Self.union(titles, other.titles)

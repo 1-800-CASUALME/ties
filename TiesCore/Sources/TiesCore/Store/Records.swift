@@ -67,6 +67,7 @@ struct SignalRow: Codable, FetchableRecord, PersistableRecord {
 
     var personId: String
     var aliases: String
+    var strongAliases: String
     var honorifics: String
     var honorificsAsWritten: String
     var titles: String
@@ -86,6 +87,7 @@ struct SignalRow: Codable, FetchableRecord, PersistableRecord {
     init(_ signals: LocalSignals, contactsSignals: String? = nil) throws {
         self.personId = signals.personId
         self.aliases = try JSONColumn.encode(signals.aliases)
+        self.strongAliases = try JSONColumn.encode(signals.strongAliases)
         self.honorifics = try JSONColumn.encode(signals.honorifics)
         self.honorificsAsWritten = try JSONColumn.encode(signals.honorificsAsWritten)
         self.titles = try JSONColumn.encode(signals.titles)
@@ -112,6 +114,7 @@ struct SignalRow: Codable, FetchableRecord, PersistableRecord {
         LocalSignals(
             personId: personId,
             aliases: try JSONColumn.decode(aliases),
+            strongAliases: try JSONColumn.decode(strongAliases),
             honorifics: try JSONColumn.decode(honorifics),
             honorificsAsWritten: try JSONColumn.decode(honorificsAsWritten),
             titles: try JSONColumn.decode(titles),

@@ -228,6 +228,29 @@ private func finding(_ url: String, name: String? = nil, company: String? = nil,
     #expect(s[0].candidate.score == ScoringWeights.default.selfName)
 }
 
+@Test func aGroupChatAliasCannotAdmitAStrangerOnItsOwn() {
+    // "Fatima Alharbi" is another member of a group chat Sara is in: capitalised, recurring,
+    // and near a mention of Sara, which is all §4.2's chat rule asks for. Nothing about it says
+    // it is a name *Sara* goes by, so it may fill a "known as" chip and nothing more — before,
+    // it took a stranger's profile past the name gate and paid it +2.0 for going by her name.
+    let i = input(name: ("Sara", "Ahmed"), company: "Acme", signals: localSignals(aliases: ["Fatima Alharbi"]))
+    let stranger = finding("https://www.linkedin.com/in/fatima-alharbi", name: "Fatima Alharbi", company: "Acme")
+
+    #expect(CandidateScorer.score(groups: [[stranger]], input: i).isEmpty)
+}
+
+@Test func aSelfSetAliasStillVouchesForACandidate() {
+    // The same shape, except this is the name she set on her own WhatsApp account. Somebody
+    // attached it to her deliberately, so a profile going by it is going by her name.
+    let i = input(name: ("Sara", "Ahmed"),
+                  signals: localSignals(aliases: ["Om Khalid"], strongAliases: ["Om Khalid"]))
+    let s = CandidateScorer.score(groups: [[finding("https://x.com/omkhalid", name: "Om Khalid")]], input: i)
+
+    #expect(s.count == 1)
+    #expect(s[0].evidence.contains { $0.kind == .selfName })
+    #expect(s[0].candidate.score == ScoringWeights.default.selfName)
+}
+
 @Test func pushNameConflict() {
     // The number's WhatsApp push name is a full name of its own, and the profile the email
     // hash resolved to is a third name again — something about this handle doesn't add up.

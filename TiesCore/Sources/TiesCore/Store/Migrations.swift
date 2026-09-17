@@ -91,7 +91,7 @@ enum Migrations {
             try db.create(table: "signal") { t in
                 t.primaryKey("personId", .text).references("person", onDelete: .cascade)
                 let jsonColumns = [
-                    "aliases", "honorifics", "honorificsAsWritten",
+                    "aliases", "strongAliases", "honorifics", "honorificsAsWritten",
                     "titles", "companies", "links", "phones", "emails", "sources",
                 ]
                 for c in jsonColumns {

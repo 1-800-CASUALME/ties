@@ -79,10 +79,10 @@ func input(
 }
 
 /// Builds a `LocalSignals` with a placeholder `personId` for `input(name:signals:)` to fill in.
-func localSignals(aliases: [String] = [], honorifics: [String] = [], honorificsAsWritten: [String] = [],
-                  titles: [String] = [], companies: [String] = [], links: [String] = [],
-                  location: String? = nil) -> LocalSignals {
-    LocalSignals(personId: "", aliases: aliases, honorifics: honorifics,
+func localSignals(aliases: [String] = [], strongAliases: [String] = [], honorifics: [String] = [],
+                  honorificsAsWritten: [String] = [], titles: [String] = [], companies: [String] = [],
+                  links: [String] = [], location: String? = nil) -> LocalSignals {
+    LocalSignals(personId: "", aliases: aliases, strongAliases: strongAliases, honorifics: honorifics,
                  honorificsAsWritten: honorificsAsWritten, titles: titles,
                  companies: companies, links: links, location: location)
 }
