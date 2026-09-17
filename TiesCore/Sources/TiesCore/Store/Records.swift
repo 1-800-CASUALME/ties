@@ -68,6 +68,7 @@ struct SignalRow: Codable, FetchableRecord, PersistableRecord {
     var personId: String
     var aliases: String
     var honorifics: String
+    var honorificsAsWritten: String
     var titles: String
     var companies: String
     var links: String
@@ -86,6 +87,7 @@ struct SignalRow: Codable, FetchableRecord, PersistableRecord {
         self.personId = signals.personId
         self.aliases = try JSONColumn.encode(signals.aliases)
         self.honorifics = try JSONColumn.encode(signals.honorifics)
+        self.honorificsAsWritten = try JSONColumn.encode(signals.honorificsAsWritten)
         self.titles = try JSONColumn.encode(signals.titles)
         self.companies = try JSONColumn.encode(signals.companies)
         self.links = try JSONColumn.encode(signals.links)
@@ -111,6 +113,7 @@ struct SignalRow: Codable, FetchableRecord, PersistableRecord {
             personId: personId,
             aliases: try JSONColumn.decode(aliases),
             honorifics: try JSONColumn.decode(honorifics),
+            honorificsAsWritten: try JSONColumn.decode(honorificsAsWritten),
             titles: try JSONColumn.decode(titles),
             companies: try JSONColumn.decode(companies),
             links: try JSONColumn.decode(links),

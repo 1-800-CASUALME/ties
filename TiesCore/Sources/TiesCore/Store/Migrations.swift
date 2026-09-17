@@ -90,7 +90,11 @@ enum Migrations {
         migrator.registerMigration("v2") { db in
             try db.create(table: "signal") { t in
                 t.primaryKey("personId", .text).references("person", onDelete: .cascade)
-                for c in ["aliases", "honorifics", "titles", "companies", "links", "phones", "emails", "sources"] {
+                let jsonColumns = [
+                    "aliases", "honorifics", "honorificsAsWritten",
+                    "titles", "companies", "links", "phones", "emails", "sources",
+                ]
+                for c in jsonColumns {
                     t.column(c, .text).notNull().defaults(to: "[]")
                 }
                 t.column("location", .text)

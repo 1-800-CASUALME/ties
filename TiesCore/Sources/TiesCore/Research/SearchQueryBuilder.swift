@@ -91,8 +91,12 @@ public enum SearchQueryBuilder {
             }
         }
 
+        // As written, never the canonical id: `"dr Sara Ahmed"` is a quoted phrase that matches
+        // nothing on any engine, and in quick mode — one seed — it would be the only extra query
+        // the local signals bought. A signal that has the id but not the spelling (collected
+        // before the spelling was kept, say) buys no honorific query at all, which is the point.
         if !name.isEmpty {
-            for honorific in cleaned(signals.honorifics) {
+            for honorific in cleaned(signals.honorificsAsWritten) {
                 seeds.append("\"\(honorific) \(name)\"")
             }
         }

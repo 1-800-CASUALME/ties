@@ -112,7 +112,8 @@ struct FakeBackend: SearchBackend {
 
 @Test func thoroughSeedsAll() {
     let i = input(name: ("Sara", "Ahmed"), company: "Acme",
-                  signals: localSignals(aliases: ["Sara Ahmed", "Sara Al-Otaibi"], honorifics: ["Dr"]))
+                  signals: localSignals(aliases: ["Sara Ahmed", "Sara Al-Otaibi"],
+                                        honorifics: ["dr"], honorificsAsWritten: ["Dr."]))
     let q = SearchQueryBuilder.queries(for: i, mode: .thorough)
     #expect(q == [
         "\"Sara Ahmed\" \"Acme\"",
@@ -120,8 +121,29 @@ struct FakeBackend: SearchBackend {
         "\"Sara Ahmed\" site:github.com",
         "\"Sara Ahmed\" (site:x.com OR site:twitter.com)",
         "\"Sara Al-Otaibi\" \"Acme\"",
-        "\"Dr Sara Ahmed\"",
+        "\"Dr. Sara Ahmed\"",
     ])
+}
+
+@Test func anArabicHonorificIsSearchedAsItWasWritten() {
+    // Spec §4.3: "Arabic honorifics searched as written". The canonical id is a key into the
+    // profession rules, not a word anybody has ever typed into a search box.
+    let signals = localSignals(honorifics: ["dr"], honorificsAsWritten: ["دكتورة"])
+    let queries = SearchQueryBuilder.queries(for: input(name: ("Sara", "Ahmed"), signals: signals), mode: .thorough)
+
+    #expect(queries.contains("\"دكتورة Sara Ahmed\""))
+    #expect(!queries.contains { $0.contains("\"dr ") })
+}
+
+@Test func aCanonicalOnlyHonorificSeedsNothing() {
+    // Better no seed than a dud one: in quick mode the seed budget is one query, and for a
+    // contact with an honorific and no alias the dud would be the only one there was.
+    let signals = localSignals(honorifics: ["dr", "prof"])
+    let quick = SearchQueryBuilder.queries(for: input(name: ("Sara", "Ahmed"), company: "Acme", signals: signals), mode: .quick)
+    let thorough = SearchQueryBuilder.queries(for: input(name: ("Sara", "Ahmed"), company: "Acme", signals: signals), mode: .thorough)
+
+    #expect(quick == ["\"Sara Ahmed\" \"Acme\""])
+    #expect(!thorough.contains { $0.contains("dr") || $0.contains("prof") })
 }
 
 @Test func aliasSeedFallsBackToLinkedInWithoutACompany() {

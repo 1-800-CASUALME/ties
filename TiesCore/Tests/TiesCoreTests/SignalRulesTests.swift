@@ -20,6 +20,21 @@ import Testing
     #expect(Honorifics.professions(for: "not-an-honorific").isEmpty)
 }
 
+@Test func honorificsKeepTheSpellingTheyWereWrittenWith() {
+    let found = SignalRules.honorificsFound(in: "كلمت المهندس أحمد امس", names: ["Ahmed", "أحمد"])
+    #expect(found.map(\.canonical) == ["eng"])
+    #expect(found.map(\.asWritten) == ["المهندس"])
+
+    // The period is part of how it was written; the id it maps to is not.
+    let latin = SignalRules.honorificsFound(in: "ask Dr. Sara about it", names: ["Sara", "Ahmed"])
+    #expect(latin.map(\.canonical) == ["dr"])
+    #expect(latin.map(\.asWritten) == ["Dr."])
+
+    // One pair per id, first spelling seen — "Dr." and "Doctor" are the same signal.
+    let repeated = SignalRules.honorificsFound(in: "Dr. Sara said. Doctor Sara agreed.", names: ["Sara"])
+    #expect(repeated.map(\.asWritten) == ["Dr."])
+}
+
 @Test func honorificsAreDedupedInFirstSeenOrder() {
     let text = "Dr. Sara said Prof. Ahmed and Dr. Ahmed agreed"
     #expect(SignalRules.honorifics(in: text, names: ["Sara", "Ahmed"]) == ["dr", "prof"])

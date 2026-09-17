@@ -57,17 +57,26 @@ public enum SignalRules {
     /// The canonical honorifics (`"dr"`, `"eng"`, …) appearing immediately before a token of one
     /// of `names`, deduped in first-seen order.
     public static func honorifics(in text: String, names: [String]) -> [String] {
+        honorificsFound(in: text, names: names).map(\.canonical)
+    }
+
+    /// The same honorifics, each paired with the word that was actually written for it — "Dr.",
+    /// "المهندس", "دكتورة". The canonical id is what the scorer and the profession rules are
+    /// keyed by; the spelling is what spec §4.3 puts in front of the name in a search query,
+    /// because nobody writes "dr Sara Ahmed". One pair per canonical id, first spelling seen.
+    public static func honorificsFound(in text: String, names: [String]) -> [(canonical: String, asWritten: String)] {
         let nameTokens = Set(names.flatMap(normalizedTokens))
         guard !nameTokens.isEmpty else { return [] }
 
         let tokens = text.split(whereSeparator: \.isWhitespace).map(String.init)
-        var found: [String] = []
+        var found: [(canonical: String, asWritten: String)] = []
         for index in tokens.indices.dropFirst() {
+            let written = tokens[index - 1]
             guard nameTokens.contains(NameMatcher.normalize(tokens[index])),
-                  let canonical = Honorifics.canonical(tokens[index - 1]),
-                  !found.contains(canonical)
+                  let canonical = Honorifics.canonical(written),
+                  !found.contains(where: { $0.canonical == canonical })
             else { continue }
-            found.append(canonical)
+            found.append((canonical, written.trimmingCharacters(in: .whitespacesAndNewlines)))
         }
         return found
     }

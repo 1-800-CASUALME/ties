@@ -7,8 +7,15 @@ public struct LocalSignals: Codable, Hashable, Sendable {
     public var personId: String
     /// Other names the person goes by: nickname, WhatsApp push name, the name used in chats.
     public var aliases: [String]
-    /// "Dr", "Eng", "Prof", "دكتور", "مهندس" — how other people address them.
+    /// The canonical ids (`"dr"`, `"eng"`, `"prof"`) of how other people address them, so a
+    /// chat reading "Eng. Sara" and a signature reading "Engineer" are one signal.
     public var honorifics: [String]
+    /// The same honorifics spelled the way they were actually written — "Dr.", "دكتور",
+    /// "المهندس". A canonical id is a key, not a word anybody searches for: spec §4.3 wants
+    /// "<honorific> <name>" searched as written, and `"dr Sara Ahmed"` matches nothing on any
+    /// engine. Kept alongside the ids rather than instead of them because the scorer and the
+    /// profession rules are keyed by id.
+    public var honorificsAsWritten: [String]
     /// Job titles read out of mail signatures.
     public var titles: [String]
     public var companies: [String]
@@ -29,6 +36,7 @@ public struct LocalSignals: Codable, Hashable, Sendable {
         personId: String,
         aliases: [String] = [],
         honorifics: [String] = [],
+        honorificsAsWritten: [String] = [],
         titles: [String] = [],
         companies: [String] = [],
         links: [String] = [],
@@ -43,6 +51,7 @@ public struct LocalSignals: Codable, Hashable, Sendable {
         self.personId = personId
         self.aliases = aliases
         self.honorifics = honorifics
+        self.honorificsAsWritten = honorificsAsWritten
         self.titles = titles
         self.companies = companies
         self.links = links
@@ -53,6 +62,27 @@ public struct LocalSignals: Codable, Hashable, Sendable {
         self.interactions = interactions
         self.sources = sources
         self.collectedAt = collectedAt
+    }
+
+    /// A tolerant decoder, the way `Fact` has one and for the same reason: this type is stored
+    /// as free JSON in `signal.contactsSignals`, so a row written before a field existed has to
+    /// keep reading rather than failing the whole row over one missing key.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        personId = try container.decodeIfPresent(String.self, forKey: .personId) ?? ""
+        aliases = try container.decodeIfPresent([String].self, forKey: .aliases) ?? []
+        honorifics = try container.decodeIfPresent([String].self, forKey: .honorifics) ?? []
+        honorificsAsWritten = try container.decodeIfPresent([String].self, forKey: .honorificsAsWritten) ?? []
+        titles = try container.decodeIfPresent([String].self, forKey: .titles) ?? []
+        companies = try container.decodeIfPresent([String].self, forKey: .companies) ?? []
+        links = try container.decodeIfPresent([String].self, forKey: .links) ?? []
+        phones = try container.decodeIfPresent([String].self, forKey: .phones) ?? []
+        emails = try container.decodeIfPresent([String].self, forKey: .emails) ?? []
+        location = try container.decodeIfPresent(String.self, forKey: .location)
+        lastContact = try container.decodeIfPresent(Date.self, forKey: .lastContact)
+        interactions = try container.decodeIfPresent(Int.self, forKey: .interactions) ?? 0
+        sources = try container.decodeIfPresent([String].self, forKey: .sources) ?? []
+        collectedAt = try container.decodeIfPresent(Date.self, forKey: .collectedAt) ?? .distantPast
     }
 
     /// True when nothing here can seed a search or verify a candidate. Phones, emails,
@@ -86,6 +116,7 @@ public struct LocalSignals: Codable, Hashable, Sendable {
         var result = self
         result.aliases = Self.union(aliases, other.aliases)
         result.honorifics = Self.union(honorifics, other.honorifics)
+        result.honorificsAsWritten = Self.union(honorificsAsWritten, other.honorificsAsWritten)
         result.titles = Self.union(titles, other.titles)
         result.companies = Self.union(companies, other.companies)
         result.links = Self.union(links, other.links)

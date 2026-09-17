@@ -10,7 +10,8 @@ import GRDB
 
     var s = LocalSignals(personId: p.id)
     s.aliases = ["Dr. Sara"]
-    s.honorifics = ["Dr"]
+    s.honorifics = ["dr"]
+    s.honorificsAsWritten = ["دكتورة"]
     s.sources = ["messages"]
     s.interactions = 3
     try store.upsertSignals(s)
@@ -20,7 +21,9 @@ import GRDB
 
     let got = try #require(try store.signals(personId: p.id))
     #expect(got.aliases == ["Dr. Sara", "Sara A."])
-    #expect(got.honorifics == ["Dr"])
+    #expect(got.honorifics == ["dr"])
+    // The spelling survives the round trip next to the id, which is what the search seeds use.
+    #expect(got.honorificsAsWritten == ["دكتورة"])
     #expect(got.titles == ["Cardiologist"])
     #expect(got.interactions == 5)
     #expect(Set(got.sources) == ["messages", "mail"])
