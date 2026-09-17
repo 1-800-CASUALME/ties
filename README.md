@@ -71,8 +71,9 @@ sparkle, can be dismissed, and runs through the provider you chose — on-device
   built after extraction, rebuilt on demand.
 - **Ask, better.** "Help with taxes" is expanded into accountant, CPA, tax advisor, bookkeeper,
   shown as chips under the field. Remove a chip and the search forgets that term.
-- **Draft.** Say what you need; Ties writes a short message and opens Messages, WhatsApp or Mail
-  with it prefilled. Nothing is sent by Ties.
+- **Draft.** Say what you need; Ties writes a short message in your own register, learned from your
+  last twenty messages to that person, and opens Messages, WhatsApp or Mail with it prefilled. The
+  sample reaches a cloud provider only with the privacy switch on. Nothing is sent by Ties.
 - **Reconnect.** People whose profile answers what you are looking for and who you have not talked
   to in three months, strongest tie first.
 - **Fact check.** Every extracted fact is re-checked against the pages it came from; the ones those
