@@ -16,6 +16,8 @@ struct MainWindow: View {
     @State private var people: [Person] = []
     @State private var profiles: [String: Profile] = [:]
     @State private var best: [String: Candidate] = [:]
+    /// What the Mac knows about each person locally, which is what Reconnect is ranked on.
+    @State private var signals: [String: LocalSignals] = [:]
     @State private var adding = false
     @State private var errorMessage: String?
 
@@ -105,8 +107,13 @@ struct MainWindow: View {
         case .researched: "Researched"
         case .unsure: "Unsure"
         case .manual: "Manual"
-        case .smartList(let name): name
+        case .reconnect: "Reconnect"
+        case .smartList(let id): smartList(id)?.name ?? "Smart list"
         }
+    }
+
+    private func smartList(_ id: String) -> SmartList? {
+        model.smartLists.first { $0.id == id }
     }
 
     /// The people the chosen list is about. "Unsure" is the one worth spelling out: it means the
@@ -122,9 +129,39 @@ struct MainWindow: View {
             people.filter { best[$0.id]?.status == .pending }
         case .manual:
             people.filter { $0.source == .manual }
-        case .smartList:
-            []
+        case .reconnect:
+            reconnect
+        case .smartList(let id):
+            members(of: id)
         }
+    }
+
+    /// People worth getting back to: someone the research wrote up, last talked to more than
+    /// three months ago, strongest relationship first (§4.5). Somebody with no signals at all
+    /// isn't here — nothing on this Mac says the two of you have ever talked, so nothing says
+    /// you have stopped.
+    private var reconnect: [Person] {
+        let cutoff = Date.now.addingTimeInterval(-90 * 24 * 60 * 60)
+        return people
+            .filter { person in
+                guard profiles[person.id] != nil, let last = signals[person.id]?.lastContact else { return false }
+                return last < cutoff
+            }
+            .sorted { lhs, rhs in
+                let left = signals[lhs.id]?.interactions ?? 0
+                let right = signals[rhs.id]?.interactions ?? 0
+                // Equal strength falls back to the name, so the list doesn't reshuffle itself
+                // between reloads.
+                return left == right ? lhs.displayName < rhs.displayName : left > right
+            }
+    }
+
+    /// The people in one smart list, in the order the provider grouped them. Ids it named that
+    /// have since been deleted simply drop out.
+    private func members(of id: String) -> [Person] {
+        guard let list = smartList(id) else { return [] }
+        let byId = Dictionary(people.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        return list.personIds.compactMap { byId[$0] }
     }
 
     // MARK: - Loading
@@ -134,6 +171,8 @@ struct MainWindow: View {
             people = try model.store.allPeople()
             profiles = try model.store.profilesByPerson()
             best = try model.store.bestCandidatesByPerson()
+            signals = try model.store.signalsByPerson()
+            model.loadSmartLists()
             if let selectedId, !people.contains(where: { $0.id == selectedId }) {
                 self.selectedId = nil
             }
