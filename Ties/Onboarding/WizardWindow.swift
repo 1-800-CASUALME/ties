@@ -44,6 +44,8 @@ struct WizardWindow: View {
             WelcomeView()
         case .access:
             AccessView()
+        case .sources:
+            SourcesView()
         case .select:
             SelectView()
         case .provider:
@@ -110,11 +112,14 @@ struct WizardWindow: View {
     /// and writing candidates long after the screen that asked for them is gone.
     private func cancel() {
         let scanner = state.scanner
+        let collector = state.collector
         let extractor = state.extractor
         state.scanner = nil
+        state.collector = nil
         state.extractor = nil
         Task {
             await scanner?.cancel()
+            await collector?.cancel()
             await extractor?.cancel()
         }
         model.resumeWizardStep = nil
