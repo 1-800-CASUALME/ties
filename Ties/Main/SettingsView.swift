@@ -13,6 +13,8 @@ struct SettingsView: View {
                 .tabItem { Label("Providers", systemImage: "sparkles") }
             ResearchSettingsView()
                 .tabItem { Label("Research", systemImage: "magnifyingglass") }
+            SourcesSettingsView()
+                .tabItem { Label("Sources", systemImage: "tray.full") }
         }
         .frame(width: 600, height: 480)
     }

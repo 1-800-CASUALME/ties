@@ -492,4 +492,31 @@ final class AppModel {
         let workers = (0..<poolSize(defaults: defaults)).map { _ in WebKitSearchBackend(engine: first) }
         return SearchPool(workers: workers, engines: engines)
     }
+
+    // MARK: - Local sources
+
+    /// Which of this Mac's own sources the user allows, and where each one stands right now.
+    /// Held here because the wizard's Sources step and Settings › Sources show the same four
+    /// rows, and `makeSignalCollector()` builds from exactly what they show.
+    let sources = SourcesModel()
+
+    /// The collector over every source worth running for this collection.
+    ///
+    /// Contacts is always in it: it reads back what the address book already wrote into the
+    /// database, so there is nothing to grant and nothing to open. Every other source has to be
+    /// both switched on and `ready` — a source that is off, not installed, or still locked
+    /// behind Full Disk Access is simply left out, which is how a run stays quiet about it
+    /// instead of failing once per person.
+    ///
+    /// Statuses come from the last `sources.refresh()`; the screens that start a collection
+    /// refresh immediately before asking for this.
+    func makeSignalCollector() -> SignalCollector {
+        var collectors: [any SourceCollector] = [ContactsCollector(store: store)]
+        for source in SourcesModel.all where source.id != SourcesModel.contactsId {
+            guard sources.isEnabled(source.id), sources.statuses[source.id] == .ready else { continue }
+            guard let collector = SourcesModel.fileCollector(source.id, userNames: sources.userNames) else { continue }
+            collectors.append(collector)
+        }
+        return SignalCollector(store: store, collectors: collectors)
+    }
 }
