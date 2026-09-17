@@ -118,7 +118,11 @@ public struct MailCollector: SourceCollector {
             guard let from = message.from, addresses.contains(from.address) else { continue }
 
             if let alias = alias(from: from.name, knownAs: input.fullName), !signals.aliases.contains(alias) {
+                // The `From` display name is the name they put on their own mail account, so it
+                // is theirs to go by: strong enough to admit a profile that goes by it and to
+                // earn it `.selfName`, unlike a name harvested out of a group chat.
                 signals.aliases.append(alias)
+                signals.strongAliases.append(alias)
             }
             guard let block = SignalRules.signature(in: message.textBody, senderName: from.name ?? input.fullName)
             else { continue }

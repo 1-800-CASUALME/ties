@@ -17,8 +17,10 @@ import Testing
     #expect(signals.companies == ["Acme Corp"])
     #expect(signals.phones == ["+966501234567"])
     #expect(signals.links == ["https://linkedin.com/in/sara-ahmed"])
-    // The From display name is RFC 2047 encoded and is not the Contacts name.
+    // The From display name is RFC 2047 encoded and is not the Contacts name. She set it on
+    // her own account, so it counts as a name she goes by and not merely as a chip.
     #expect(signals.aliases == ["Sarita"])
+    #expect(signals.strongAliases == ["Sarita"])
     #expect(signals.sources == ["mail"])
     // Every message counts, in either direction; the newest is the quoted reply.
     #expect(signals.interactions == 3)
