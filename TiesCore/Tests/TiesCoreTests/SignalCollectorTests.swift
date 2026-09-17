@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import GRDB
 @testable import TiesCore
 
 /// A `SourceCollector` that answers with fixed signals (or throws a fixed error), and counts the
@@ -275,4 +276,48 @@ private func mailLike() -> FakeCollector {
         "whatsapp": .needsAccess,
         "mail": .unavailable,
     ])
+}
+
+// MARK: - What a pass costs
+
+/// Counts committed write transactions, to hold "a chunk costs a write, not a person".
+private final class CollectCommitCounter: TransactionObserver, @unchecked Sendable {
+    private let lock = NSLock()
+    private var commits = 0
+
+    var count: Int { lock.withLock { commits } }
+
+    func observes(eventsOfKind eventKind: DatabaseEventKind) -> Bool { true }
+    func databaseDidChange(with event: DatabaseEvent) {}
+    func databaseDidCommit(_ db: Database) { lock.withLock { commits += 1 } }
+    func databaseDidRollback(_ db: Database) {}
+}
+
+@Test func aCollectionPassWritesPerChunkNotPerPerson() async throws {
+    func commits(collecting count: Int) async throws -> Int {
+        let store = try Store.inMemory()
+        let people = (0..<count).map { Person(givenName: "P\($0)", familyName: "X") }
+        try store.upsertPeople(people, channels: [])
+
+        let counter = CollectCommitCounter()
+        store.writer.add(transactionObserver: counter, extent: .observerLifetime)
+
+        let collector = SignalCollector(store: store, collectors: [messagesLike(), mailLike()])
+        for await _ in await collector.run(personIds: people.map(\.id)) {}
+
+        // Every person is still written, and still done.
+        #expect(try store.signalsByPerson().count == count)
+        #expect(try store.counts(kind: .collect)[.done] == count)
+        return counter.count
+    }
+
+    // One enqueue for the pass, then three writes per chunk of fifty: the chunk's `.running`
+    // states, its signal rows (each row's FTS rewrite inside that same transaction), and its
+    // results. Not the three per person — `.running`, the row, `.done` — it used to be.
+    let chunks = { (people: Int) in 1 + 3 * Int((Double(people) / Double(SignalCollector.chunkSize)).rounded(.up)) }
+    #expect(try await commits(collecting: 50) == chunks(50))
+    #expect(try await commits(collecting: 120) == chunks(120))
+    // The shape of the thing: a hundred and twenty people cost well under a hundred and twenty
+    // transactions, where before they cost three hundred and sixty.
+    #expect(try await commits(collecting: 120) < 120)
 }

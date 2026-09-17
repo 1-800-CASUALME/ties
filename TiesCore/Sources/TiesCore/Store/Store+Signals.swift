@@ -9,10 +9,20 @@ extension Store {
     /// rebuilds the merged columns from nothing, and `contactsSignals` is carried across
     /// untouched so that rebuild neither drops what Contacts knows nor has to re-derive it.
     public func upsertSignals(_ s: LocalSignals) throws {
+        try upsertSignalsBatch([s])
+    }
+
+    /// The same for a chunk of a collection pass, in one transaction. A pass covers the whole
+    /// address book, and a write plus an FTS rewrite each would be thousands of fsync'd
+    /// transactions on the front of the wizard's slowest screen.
+    public func upsertSignalsBatch(_ batch: [LocalSignals]) throws {
+        guard !batch.isEmpty else { return }
         try writer.write { db in
-            let contacts = try SignalRow.fetchOne(db, key: s.personId)?.contactsSignals
-            try SignalRow(s, contactsSignals: contacts).save(db)
-            try Self.rewriteFTS(db, personId: s.personId)
+            for signals in batch {
+                let contacts = try SignalRow.fetchOne(db, key: signals.personId)?.contactsSignals
+                try SignalRow(signals, contactsSignals: contacts).save(db)
+                try Self.rewriteFTS(db, personId: signals.personId)
+            }
         }
     }
 

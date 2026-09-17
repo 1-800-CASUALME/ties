@@ -16,16 +16,29 @@ extension Store {
     }
 
     public func setJob(kind: Job.Kind, personId: String, state: Job.State, error: String? = nil) throws {
+        try setJobs(kind: kind, states: [(personId: personId, state: state, error: error)])
+    }
+
+    /// The same for a batch of people, in one transaction — what a collection or scan pass uses
+    /// so a chunk of fifty costs one write rather than fifty.
+    public func setJobs(
+        kind: Job.Kind,
+        states: [(personId: String, state: Job.State, error: String?)]
+    ) throws {
+        guard !states.isEmpty else { return }
+        let now = Date.now
         try writer.write { db in
-            guard var job = try Job
-                .filter(Column("kind") == kind)
-                .filter(Column("personId") == personId)
-                .fetchOne(db)
-            else { return }
-            job.state = state
-            job.error = error
-            job.updatedAt = .now
-            try job.update(db)
+            for (personId, state, error) in states {
+                guard var job = try Job
+                    .filter(Column("kind") == kind)
+                    .filter(Column("personId") == personId)
+                    .fetchOne(db)
+                else { continue }
+                job.state = state
+                job.error = error
+                job.updatedAt = now
+                try job.update(db)
+            }
         }
     }
 

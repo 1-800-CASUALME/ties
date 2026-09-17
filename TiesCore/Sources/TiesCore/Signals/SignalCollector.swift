@@ -12,6 +12,14 @@ public actor SignalCollector {
     /// The `waitingFor` text of the one event a rejected second run yields.
     public static let busyNotice = "Another collection is running"
 
+    /// How many people are collected before their rows are written. A pass covers the whole
+    /// address book, and the write per person it used to do — job `.running`, the signal row
+    /// with its FTS rewrite, job `.done` — was three fsync'd transactions each, six thousand of
+    /// them for two thousand people, before any research had started. Fifty is small enough
+    /// that a run stopped half way through has lost at most fifty people's work, and large
+    /// enough that the transactions stop being the cost of the pass.
+    static let chunkSize = 50
+
     private let store: Store
     private let collectors: [any SourceCollector]
     private let concurrency: Int
@@ -101,32 +109,44 @@ public actor SignalCollector {
 
         let maxInFlight = max(1, concurrency)
 
-        await withTaskGroup(of: String.self) { group in
-            var index = 0
-            var inFlight = 0
+        // A chunk at a time, so the whole chunk's rows go down in one transaction each. Inside
+        // a chunk the people still run `concurrency` at a time, as they always did.
+        for start in stride(from: 0, to: personIds.count, by: Self.chunkSize) {
+            if cancelled { break }
+            let chunk = Array(personIds[start..<min(start + Self.chunkSize, personIds.count)])
+            try? store.setJobs(kind: .collect, states: chunk.map { ($0, .running, nil) })
 
-            func startNext() {
-                guard !cancelled, index < personIds.count else { return }
-                let personId = personIds[index]
-                index += 1
-                inFlight += 1
-                group.addTask {
-                    await self.collectPerson(personId: personId)
+            var outcomes: [Outcome] = []
+            await withTaskGroup(of: Outcome.self) { group in
+                var index = 0
+                var inFlight = 0
+
+                func startNext() {
+                    guard !cancelled, index < chunk.count else { return }
+                    let personId = chunk[index]
+                    index += 1
+                    inFlight += 1
+                    group.addTask {
+                        await self.collectPerson(personId: personId)
+                    }
+                }
+
+                while inFlight < maxInFlight, index < chunk.count, !cancelled {
+                    startNext()
+                }
+
+                while let outcome = await group.next() {
+                    inFlight -= 1
+                    completed += 1
+                    outcomes.append(outcome)
+                    continuation?.yield(ScanProgress(
+                        completed: completed, total: total, currentName: outcome.displayName, finished: false
+                    ))
+                    startNext()
                 }
             }
 
-            while inFlight < maxInFlight, index < personIds.count, !cancelled {
-                startNext()
-            }
-
-            while let finishedName = await group.next() {
-                inFlight -= 1
-                completed += 1
-                continuation?.yield(ScanProgress(
-                    completed: completed, total: total, currentName: finishedName, finished: false
-                ))
-                startNext()
-            }
+            write(outcomes)
         }
 
         for collector in collectors {
@@ -143,24 +163,52 @@ public actor SignalCollector {
         runTask = nil
     }
 
-    /// Runs every collector for one person and upserts the merged row. Returns the person's
-    /// display name, for progress reporting.
+    // MARK: - One chunk
+
+    /// What collecting for one person came to, held until the rest of the chunk is done rather
+    /// than written there and then.
+    private struct Outcome: Sendable {
+        let personId: String
+        let displayName: String
+        /// `nil` when there is nothing to write — the person could not be read at all.
+        let signals: LocalSignals?
+        let state: Job.State
+        let error: String?
+    }
+
+    /// Writes a chunk: every person's merged row (with its FTS rewrite in the same transaction)
+    /// and then every person's job state. A write that throws fails the chunk's people with the
+    /// reason, which is what the per-person version did one at a time.
+    private func write(_ outcomes: [Outcome]) {
+        guard !outcomes.isEmpty else { return }
+        do {
+            try store.upsertSignalsBatch(outcomes.compactMap(\.signals))
+            try store.setJobs(kind: .collect, states: outcomes.map { ($0.personId, $0.state, $0.error) })
+        } catch {
+            try? store.setJobs(
+                kind: .collect,
+                states: outcomes.map { ($0.personId, .failed, "\(error)") }
+            )
+        }
+    }
+
+    /// Runs every collector for one person and returns the merged row for the chunk to write.
     ///
     /// The job ends `.done` once the person has been processed even when some sources failed —
     /// those are recorded in the job's error as `"<id>: <error>"` and skipped — and `.failed` only
-    /// when the person cannot be read or the store write throws.
-    private func collectPerson(personId: String) async -> String {
+    /// when the person cannot be read or the chunk's store write throws.
+    private func collectPerson(personId: String) async -> Outcome {
         let existingPerson = try? store.person(id: personId)
         let displayName = existingPerson?.displayName ?? personId
 
         continuation?.yield(ScanProgress(completed: completed, total: total, currentName: displayName, finished: false))
 
         do {
-            try store.setJob(kind: .collect, personId: personId, state: .running)
-
             guard let person = existingPerson else {
-                try? store.setJob(kind: .collect, personId: personId, state: .failed, error: "person \(personId) not found")
-                return displayName
+                return Outcome(
+                    personId: personId, displayName: displayName, signals: nil,
+                    state: .failed, error: "person \(personId) not found"
+                )
             }
 
             let channels = try store.channels(personId: personId)
@@ -192,15 +240,15 @@ public actor SignalCollector {
 
             merged.personId = personId
             merged.collectedAt = .now
-            try store.upsertSignals(merged)
-            try store.setJob(
-                kind: .collect, personId: personId, state: .done,
-                error: errors.isEmpty ? nil : errors.joined(separator: "; ")
+            return Outcome(
+                personId: personId, displayName: displayName, signals: merged,
+                state: .done, error: errors.isEmpty ? nil : errors.joined(separator: "; ")
             )
         } catch {
-            try? store.setJob(kind: .collect, personId: personId, state: .failed, error: "\(error)")
+            return Outcome(
+                personId: personId, displayName: displayName, signals: nil,
+                state: .failed, error: "\(error)"
+            )
         }
-
-        return displayName
     }
 }
