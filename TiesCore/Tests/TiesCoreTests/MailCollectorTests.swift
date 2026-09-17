@@ -190,6 +190,28 @@ private struct EmptyMailIndex: MailIndex {
     #expect(working.status() == .ready)
 }
 
+@Test func theUnindexedVerdictIsTheRunsNotThePersons() async throws {
+    let root = try EMLXFixture.mailbox()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let collector = MailCollector(index: EmptyMailIndex(), root: root, fallbackCeiling: 2)
+
+    try await collector.beginSession()
+    _ = try await collector.collect(for: input(name: ("Sara", "Ahmed"), emails: [EMLXFixture.person]), since: nil)
+    #expect(collector.status() == .error(MailCollector.indexMissingMessage))
+
+    // Another person of the same run finishes afterwards. The mailbox is no more readable than
+    // it was, so nothing they do may erase what the run already concluded — at concurrency 3 the
+    // three of them overlap, and a per-call reset would lose the verdict entirely.
+    _ = try await collector.collect(for: input(name: ("No", "One")), since: nil)
+    #expect(collector.status() == .error(MailCollector.indexMissingMessage))
+    await collector.endSession()
+    #expect(collector.status() == .error(MailCollector.indexMissingMessage))
+
+    // The next run starts with a clean slate.
+    try await collector.beginSession()
+    #expect(collector.status() == .ready)
+}
+
 @Test func spotlightFallsBackToTheDirectoryWhenItFindsNothing() async throws {
     let root = try EMLXFixture.mailbox()
     defer { try? FileManager.default.removeItem(at: root) }

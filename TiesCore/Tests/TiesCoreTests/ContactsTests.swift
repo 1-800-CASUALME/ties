@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import GRDB
 @testable import TiesCore
 
 @Test func vcardParses() throws {
@@ -66,7 +67,7 @@ private func saraWithExtras(
     _ = try ContactSync.sync([saraWithExtras()], into: store)
 
     let sara = try #require(try store.allPeople().first)
-    let signals = try #require(try store.signals(personId: sara.id))
+    let signals = try #require(try store.contactsSignals(personId: sara.id))
 
     #expect(signals.aliases == ["Sarita"])
     #expect(signals.honorifics == ["dr"])
@@ -76,6 +77,9 @@ private func saraWithExtras(
     // Contacts says nothing about how often you two talk.
     #expect(signals.interactions == 0)
     #expect(signals.lastContact == nil)
+
+    // The nickname is searchable straight away, before any collection pass has run.
+    #expect(try store.ftsSearch("Sarita").map(\.personId).contains(sara.id))
 }
 
 @Test func aNicknameThatIsJustTheNameIsNotAnAlias() throws {
@@ -83,7 +87,7 @@ private func saraWithExtras(
     _ = try ContactSync.sync([saraWithExtras(nickname: "Sara Ahmed", note: nil)], into: store)
 
     let sara = try #require(try store.allPeople().first)
-    let signals = try #require(try store.signals(personId: sara.id))
+    let signals = try #require(try store.contactsSignals(personId: sara.id))
     #expect(signals.aliases.isEmpty)
     #expect(signals.location == "Riyadh, Saudi Arabia")
 }
@@ -97,28 +101,71 @@ private func saraWithExtras(
 
     let sara = try #require(try store.allPeople().first)
     #expect(try store.signals(personId: sara.id) == nil)
+    #expect(try store.contactsSignals(personId: sara.id) == nil)
 }
 
-@Test func syncingAgainKeepsWhatOtherSourcesCollected() throws {
+@Test func syncingAgainReplacesTheContactsContributionAndLeavesTheRestAlone() throws {
     let store = try Store.inMemory()
     _ = try ContactSync.sync([saraWithExtras()], into: store)
     let sara = try #require(try store.allPeople().first)
 
-    // A collection pass has since added what the chats know.
-    var collected = try #require(try store.signals(personId: sara.id))
-    collected.aliases.append("Abu Khalid")
-    collected.interactions = 12
-    collected.sources.append("messages")
-    try store.upsertSignals(collected)
+    // A collection pass has since written what the chats know into the merged columns.
+    try store.upsertSignals(LocalSignals(
+        personId: sara.id, aliases: ["Abu Khalid"], interactions: 12, sources: ["messages"]
+    ))
 
-    _ = try ContactSync.sync([saraWithExtras(city: "Jeddah")], into: store)
+    // She has moved, and the nickname is gone from her card.
+    _ = try ContactSync.sync([saraWithExtras(nickname: nil, city: "Jeddah")], into: store)
 
-    let merged = try #require(try store.signals(personId: sara.id))
-    #expect(merged.aliases == ["Sarita", "Abu Khalid"])
-    #expect(merged.interactions == 12)
-    #expect(merged.sources.contains("messages"))
-    // The address book is the authority on where the person is, so a move is picked up.
-    #expect(merged.location == "Jeddah, Saudi Arabia")
+    let collected = try #require(try store.signals(personId: sara.id))
+    #expect(collected.aliases == ["Abu Khalid"])
+    #expect(collected.interactions == 12)
+    #expect(collected.sources == ["messages"])
+
+    // The contribution is replaced outright rather than unioned, so a nickname the address book
+    // no longer holds really goes, and the move is picked up.
+    let contribution = try #require(try store.contactsSignals(personId: sara.id))
+    #expect(contribution.aliases.isEmpty)
+    #expect(contribution.location == "Jeddah, Saudi Arabia")
+}
+
+@Test func syncingAWholeAddressBookIsOneWriteTransaction() throws {
+    func commits(syncing count: Int) throws -> Int {
+        let store = try Store.inMemory()
+        let counter = CommitCounter()
+        store.writer.add(transactionObserver: counter, extent: .observerLifetime)
+        let contacts = (0..<count).map { index in
+            ImportedContact(
+                identifier: "cn:\(index)",
+                givenName: "P\(index)",
+                familyName: "X",
+                nickname: "Nick\(index)",
+                postalCity: "Riyadh",
+                postalCountry: "Saudi Arabia"
+            )
+        }
+        let written = try ContactSync.sync(contacts, into: store)
+        #expect(written == count)
+        #expect(try store.contactsSignals(personId: store.allPeople()[0].id) != nil)
+        return counter.count
+    }
+
+    // The cost of a sync is the same whether it is ten people or two hundred: one transaction
+    // for the people and channels, one for every contact's extras.
+    #expect(try commits(syncing: 200) == (try commits(syncing: 10)))
+}
+
+/// Counts committed write transactions, to hold the "one transaction per import" rule.
+private final class CommitCounter: TransactionObserver, @unchecked Sendable {
+    private let lock = NSLock()
+    private var commits = 0
+
+    var count: Int { lock.withLock { commits } }
+
+    func observes(eventsOfKind eventKind: DatabaseEventKind) -> Bool { true }
+    func databaseDidChange(with event: DatabaseEvent) {}
+    func databaseDidCommit(_ db: Database) { lock.withLock { commits += 1 } }
+    func databaseDidRollback(_ db: Database) {}
 }
 
 @Test func contactsCollectorReadsBackWhatTheSyncStored() async throws {

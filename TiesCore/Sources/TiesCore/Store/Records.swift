@@ -78,8 +78,11 @@ struct SignalRow: Codable, FetchableRecord, PersistableRecord {
     var interactions: Int
     var sources: String
     var collectedAt: Date
+    /// The address book's contribution, as a JSON `LocalSignals` — see the `signal` table in
+    /// `Migrations`. Held apart from the columns above, which a collection pass rebuilds.
+    var contactsSignals: String?
 
-    init(_ signals: LocalSignals) throws {
+    init(_ signals: LocalSignals, contactsSignals: String? = nil) throws {
         self.personId = signals.personId
         self.aliases = try JSONColumn.encode(signals.aliases)
         self.honorifics = try JSONColumn.encode(signals.honorifics)
@@ -93,6 +96,14 @@ struct SignalRow: Codable, FetchableRecord, PersistableRecord {
         self.interactions = signals.interactions
         self.sources = try JSONColumn.encode(signals.sources)
         self.collectedAt = signals.collectedAt
+        self.contactsSignals = contactsSignals
+    }
+
+    /// The address book's contribution, decoded. `nil` when Contacts has never had anything to
+    /// say about this person.
+    func contacts() throws -> LocalSignals? {
+        guard let contactsSignals else { return nil }
+        return try JSONDecoder().decode(LocalSignals.self, from: Data(contactsSignals.utf8))
     }
 
     func asSignals() throws -> LocalSignals {

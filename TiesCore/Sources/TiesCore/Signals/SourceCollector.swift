@@ -99,6 +99,13 @@ public struct SourceSnapshot: Sendable {
 ///
 /// A collector is a `Sendable` value type shared across the people of a run, so the snapshot it
 /// holds lives in this reference box behind a lock rather than in the collector itself.
+///
+/// The lock makes the box's own state safe; it cannot make a snapshot safe to read after it has
+/// been closed. `end()` (and `begin()` replacing an earlier snapshot) deletes the copy on disk,
+/// so a `collect` still reading from it would fail mid-query. **`beginSession()` and
+/// `endSession()` must not overlap a `collect` on the same collector.** `SignalCollector`
+/// guarantees this: it begins every session before the task group starts and ends them only
+/// after the group has drained, cancelled or not.
 final class SnapshotSession: @unchecked Sendable {
     private let lock = NSLock()
     private var snapshot: SourceSnapshot?
@@ -114,13 +121,11 @@ final class SnapshotSession: @unchecked Sendable {
     /// Opens the run's snapshot, closing any earlier one it replaces.
     func begin(_ url: URL) throws {
         let fresh = try SourceSnapshot.open(url)
-        let previous: SourceSnapshot? = lock.withLock {
-            let previous = snapshot
+        lock.withLock {
+            snapshot?.close()
             snapshot = fresh
             opened += 1
-            return previous
         }
-        previous?.close()
     }
 
     /// A snapshot for one `collect` outside a session. The caller closes it.
@@ -130,12 +135,13 @@ final class SnapshotSession: @unchecked Sendable {
         return fresh
     }
 
+    /// Closes the run's snapshot under the lock, so the copy is never deleted while another
+    /// `begin`/`end` is swapping the box — two `end()` calls cannot both close the same one, and
+    /// `current` cannot hand out a snapshot a concurrent `end()` is halfway through deleting.
     func end() {
-        let previous: SourceSnapshot? = lock.withLock {
-            let previous = snapshot
+        lock.withLock {
+            snapshot?.close()
             snapshot = nil
-            return previous
         }
-        previous?.close()
     }
 }

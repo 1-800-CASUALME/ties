@@ -58,13 +58,13 @@ public enum ContactSync {
 
     /// Converts and upserts `contacts` into `store`, returning the number of people written.
     ///
-    /// Each contact's extras — nickname, note, postal city/country — also become a `contacts`
-    /// `LocalSignals` row, merged into whatever the other sources have already collected for that
-    /// person. The merge is a union, so a nickname or honorific the address book no longer holds
-    /// stays in the row until the next full collection pass ("Collect again") rebuilds it.
+    /// Each contact's extras — nickname, note, postal city/country — are written as that person's
+    /// Contacts contribution, in the `signal` row's own `contactsSignals` column rather than
+    /// merged into the collected ones. `ContactsCollector` reads it back on the next collection
+    /// pass, so re-syncing replaces what the address book says (a removed nickname really goes)
+    /// without touching what the chats and mail found.
     @discardableResult
     public static func sync(_ contacts: [ImportedContact], into store: Store) throws -> Int {
-        let kept = contacts.filter { !$0.hasNoNameOrOrg }
         let (people, channels) = toRecords(contacts)
         try store.upsertPeople(people, channels: channels)
 
@@ -75,16 +75,20 @@ public enum ContactSync {
             if let identifier = person.cnIdentifier { idByIdentifier[identifier] = person.id }
         }
 
-        for (contact, person) in zip(kept, people) {
-            let personId = idByIdentifier[contact.identifier] ?? person.id
+        // Keyed by identifier rather than by position: `toRecords` filters the same way this
+        // does, but a pairing that depends on two filters agreeing is one edit away from
+        // attributing one person's note to another.
+        let contactsByIdentifier = Dictionary(contacts.map { ($0.identifier, $0) }, uniquingKeysWith: { _, last in last })
+
+        var extras: [(personId: String, signals: LocalSignals)] = []
+        for person in people {
+            guard let identifier = person.cnIdentifier, let contact = contactsByIdentifier[identifier] else { continue }
+            let personId = idByIdentifier[identifier] ?? person.id
             guard let contribution = signals(from: contact, personId: personId, knownAs: person.displayName)
             else { continue }
-            var row = try store.signals(personId: personId)?.merged(with: contribution) ?? contribution
-            // `merged` keeps the older location; the address book is the authority on where the
-            // person is, so a move in Contacts wins.
-            if let location = contribution.location { row.location = location }
-            try store.upsertSignals(row)
+            extras.append((personId: personId, signals: contribution))
         }
+        try store.upsertContactsSignalsBatch(extras)
         return people.count
     }
 

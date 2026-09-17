@@ -25,20 +25,22 @@ public struct ContactsCollector: SourceCollector {
         .ready
     }
 
-    /// What Contacts contributes about the person, and only that: the names they go by, how they
-    /// are addressed, the links their note held, and where they are.
+    /// What Contacts contributes about the person and nothing else: the `contactsSignals` column
+    /// `ContactSync` wrote, never the merged columns beside it.
     ///
-    /// Deliberately not `lastContact`, `interactions`, `phones` or `emails`. Those describe the
-    /// relationship rather than the person, they belong to the chat and mail collectors, and
-    /// `merged(with:)` adds interaction counts up — returning them here would double every
-    /// person's history on every pass.
+    /// Reading the merged row instead would make every pass carry the previous pass's Messages,
+    /// WhatsApp and Mail values back in under the Contacts name — a row that could never shrink,
+    /// so a source switched off would keep contributing for ever.
     public func collect(for input: ProbeInput, since: Date?) async throws -> LocalSignals {
-        var signals = LocalSignals(personId: input.person.id)
-        guard let stored = try store.signals(personId: input.person.id) else { return signals }
-        signals.aliases = stored.aliases
-        signals.honorifics = stored.honorifics
-        signals.links = stored.links
-        signals.location = stored.location
+        var signals = try store.contactsSignals(personId: input.person.id)
+            ?? LocalSignals(personId: input.person.id)
+        signals.personId = input.person.id
+        // The relationship is not Contacts' to describe: the counts and dates belong to the chat
+        // and mail collectors, and `merged(with:)` adds interaction counts up.
+        signals.lastContact = nil
+        signals.interactions = 0
+        signals.phones = []
+        signals.emails = []
         guard !signals.isEmpty else { return LocalSignals(personId: input.person.id) }
         signals.sources = [id]
         return signals

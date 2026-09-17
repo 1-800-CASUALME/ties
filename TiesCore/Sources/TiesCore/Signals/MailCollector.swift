@@ -24,8 +24,8 @@ public struct MailCollector: SourceCollector {
     /// Above this many `.emlx` files, the directory walk that stands in for a missing Spotlight
     /// index is not attempted (`SpotlightMailIndex` applies the same ceiling).
     private let fallbackCeiling: Int
-    /// What the last run concluded, so `status()` can report it afterwards.
-    private let outcome = Outcome()
+    /// What this run has concluded, and what it costs to find out — see `Session`.
+    private let session = Session()
 
     public init(index: any MailIndex = SpotlightMailIndex(), root: URL = MailCollector.defaultRoot) {
         self.init(index: index, root: root, fallbackCeiling: SpotlightMailIndex.directoryFallbackLimit)
@@ -44,8 +44,20 @@ public struct MailCollector: SourceCollector {
     /// Spotlight nor a directory walk could answer for.
     public func status() -> SourceStatus {
         let onDisk = fileSystemStatus()
-        guard case .ready = onDisk, let recorded = outcome.value else { return onDisk }
+        guard case .ready = onDisk, let recorded = session.outcome else { return onDisk }
         return recorded
+    }
+
+    // MARK: - Session
+
+    /// Mail has no store to copy, so a session is only run-scoped bookkeeping: it clears the last
+    /// run's verdict and works out — once, rather than once per person — whether the mailbox is
+    /// small enough for a directory walk to stand in for a missing Spotlight index.
+    public func beginSession() async throws {
+        session.begin(tooLarge: measureMailboxSize())
+        #if DEBUG
+        visits.reset()
+        #endif
     }
 
     private func fileSystemStatus() -> SourceStatus {
@@ -64,16 +76,13 @@ public struct MailCollector: SourceCollector {
     // MARK: - Collection
 
     public func collect(for input: ProbeInput, since: Date?) async throws -> LocalSignals {
-        #if DEBUG
-        visits.reset()
-        #endif
-        // This run's own verdict replaces the last one's, so a mailbox that has since been
-        // indexed stops reporting the old complaint.
-        outcome.record(nil)
-
         // Ask the file system first: without Full Disk Access the mailbox is not merely
         // unreadable, it is invisible, and an open-first read would call that "not installed".
-        switch status() {
+        //
+        // `fileSystemStatus()` rather than `status()`: the run's "index found nothing" verdict is
+        // there to be shown, not to stop the next person from being looked up — Spotlight may
+        // well answer for them.
+        switch fileSystemStatus() {
         case .unavailable: throw SourceError.unavailable
         case .needsAccess: throw SourceError.needsAccess
         case .error(let message): throw SourceError.malformed(message)
@@ -85,7 +94,10 @@ public struct MailCollector: SourceCollector {
 
         let messages = try await read(for: input, since: since)
         guard !messages.isEmpty else {
-            if mailboxIsTooLargeToWalk() { outcome.record(.error(Self.indexMissingMessage)) }
+            // The verdict is the run's, not this person's: it is set by whoever hits the case
+            // first and stays set, because at concurrency 3 the next person to find mail would
+            // otherwise erase a complaint that is still true of the mailbox.
+            if mailboxIsTooLargeToWalk() { session.recordIndexMissing(Self.indexMissingMessage) }
             return signals
         }
         signals.sources = ["mail"]
@@ -137,9 +149,16 @@ public struct MailCollector: SourceCollector {
     }
 
     /// Whether the mailbox is past the ceiling above which a missing Spotlight index cannot be
-    /// stood in for by reading the files. Only asked when a run found nothing, which is the only
-    /// time the answer changes what the user is told.
+    /// stood in for by reading the files. Measured once per run — the walk visits up to
+    /// `fallbackCeiling + 1` files and the answer is about the mailbox, not about the person.
     private func mailboxIsTooLargeToWalk() -> Bool {
+        if let known = session.tooLarge { return known }
+        let measured = measureMailboxSize()
+        session.setTooLarge(measured)
+        return measured
+    }
+
+    private func measureMailboxSize() -> Bool {
         DirectoryMailIndex.emlxFiles(in: root, limit: fallbackCeiling + 1).count > fallbackCeiling
     }
 
@@ -157,22 +176,46 @@ public struct MailCollector: SourceCollector {
         for value in values where !target.contains(value) { target.append(value) }
     }
 
-    /// The last run's verdict, in a reference box because the collector is a `Sendable` value
-    /// shared across the people of a run.
-    private final class Outcome: @unchecked Sendable {
+    /// What a run has learned, in a reference box because the collector is a `Sendable` value
+    /// shared across every person of that run, read and written from all of them at once.
+    private final class Session: @unchecked Sendable {
         private let lock = NSLock()
         private var status: SourceStatus?
+        private var measured: Bool?
 
-        var value: SourceStatus? { lock.withLock { status } }
-        func record(_ status: SourceStatus?) { lock.withLock { self.status = status } }
+        var outcome: SourceStatus? { lock.withLock { status } }
+        var tooLarge: Bool? { lock.withLock { measured } }
+
+        /// Starts a run: the previous verdict goes, so a mailbox that has since been indexed
+        /// stops reporting the old complaint.
+        func begin(tooLarge: Bool) {
+            lock.withLock {
+                status = nil
+                measured = tooLarge
+            }
+        }
+
+        /// The first person to find the index missing sets the verdict for the whole run; the
+        /// rest neither repeat nor clear it.
+        func recordIndexMissing(_ message: String) {
+            lock.withLock {
+                guard status == nil else { return }
+                status = .error(message)
+            }
+        }
+
+        func setTooLarge(_ value: Bool) {
+            lock.withLock { measured = value }
+        }
     }
 
     // MARK: - Test support
 
     #if DEBUG
-    /// How many `.emlx` files this collector's last `collect(for:since:)` opened — how the
-    /// per-address cap is asserted without a counting file system. Per collector, not global, so
-    /// tests running in parallel don't count each other's work.
+    /// How many `.emlx` files this collector has opened since the run began (or since it was
+    /// made, when it is used without a session) — how the per-address cap is asserted without a
+    /// counting file system. Per collector and lock-protected, so neither tests running in
+    /// parallel nor the three people in flight during a run disturb each other's count.
     public var lastVisited: Int { visits.value }
 
     private let visits = Visits()

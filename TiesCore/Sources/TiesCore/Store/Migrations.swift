@@ -97,6 +97,12 @@ enum Migrations {
                 t.column("lastContact", .datetime)
                 t.column("interactions", .integer).notNull().defaults(to: 0)
                 t.column("collectedAt", .datetime).notNull()
+                // The address book's own contribution, as a JSON `LocalSignals`, kept apart from
+                // the merged columns. `ContactSync` writes it when contacts are imported and
+                // `ContactsCollector` reads it back, so a collection pass can rebuild the merged
+                // columns from nothing without either losing what Contacts knows or re-injecting
+                // the previous pass's chat and mail values forever.
+                t.column("contactsSignals", .text)
             }
             try db.create(table: "smartList") { t in
                 t.primaryKey("id", .text)

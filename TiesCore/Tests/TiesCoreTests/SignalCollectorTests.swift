@@ -113,6 +113,39 @@ private func mailLike() -> FakeCollector {
     #expect(!error.contains("messages"))
 }
 
+@Test func aRebuiltRowDropsASourceThatWasSwitchedOff() async throws {
+    let store = try Store.inMemory()
+    let sara = Person(cnIdentifier: "cn:sara", givenName: "Sara", familyName: "Ahmed")
+    try store.upsertPeople([sara], channels: [])
+    try store.upsertContactsSignals(
+        personId: sara.id,
+        LocalSignals(personId: sara.id, aliases: ["Sarita"], location: "Riyadh", sources: ["contacts"])
+    )
+
+    let contacts = ContactsCollector(store: store)
+    let chats = messagesLike()
+    for await _ in await SignalCollector(store: store, collectors: [contacts, chats]).run(personIds: [sara.id]) {}
+
+    let first = try #require(try store.signals(personId: sara.id))
+    #expect(first.aliases == ["Sarita"])
+    #expect(first.honorifics == ["dr"])
+    #expect(first.interactions == 4)
+    #expect(first.sources == ["contacts", "messages"])
+
+    // Messages is switched off and the pass is run again.
+    for await _ in await SignalCollector(store: store, collectors: [contacts]).run(personIds: [sara.id]) {}
+
+    let second = try #require(try store.signals(personId: sara.id))
+    // What the chats found is gone rather than carried forward under the Contacts name…
+    #expect(second.honorifics.isEmpty)
+    #expect(second.interactions == 0)
+    #expect(second.sources == ["contacts"])
+    // …and what the address book knows survived the rebuild.
+    #expect(second.aliases == ["Sarita"])
+    #expect(second.location == "Riyadh")
+    #expect(try store.contactsSignals(personId: sara.id)?.aliases == ["Sarita"])
+}
+
 @Test func stagesAreStreamedInTheOrderTheCollectorsWereGiven() async throws {
     let store = try Store.inMemory()
     let sara = Person(givenName: "Sara", familyName: "Ahmed")

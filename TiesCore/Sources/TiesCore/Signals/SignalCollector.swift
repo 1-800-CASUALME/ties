@@ -67,12 +67,20 @@ public actor SignalCollector {
 
     /// Where each source stands right now, by collector id, for the Sources step and the Settings
     /// pane to show.
-    public func statuses() -> [String: SourceStatus] {
-        var result: [String: SourceStatus] = [:]
-        for collector in collectors {
-            result[collector.id] = collector.status()
+    ///
+    /// `nonisolated`, and each `status()` runs in its own child task: answering means stat-ing a
+    /// file or listing a directory, and on a mailbox that is slow to answer — a network home
+    /// directory, a disk that has spun down — doing that on the actor would hold up a collection
+    /// run that is already going.
+    public nonisolated func statuses() async -> [String: SourceStatus] {
+        await withTaskGroup(of: (String, SourceStatus).self) { group in
+            for collector in collectors {
+                group.addTask { (collector.id, collector.status()) }
+            }
+            var result: [String: SourceStatus] = [:]
+            for await (id, status) in group { result[id] = status }
+            return result
         }
-        return result
     }
 
     private func execute(personIds: [String]) async {
@@ -160,7 +168,10 @@ public actor SignalCollector {
 
             // The row is rebuilt from the sources rather than added to the stored one: a full
             // pass reads each source from the beginning, so merging into what a previous pass
-            // wrote would count every message twice.
+            // wrote would count every message twice and keep a source that has since been
+            // switched off contributing for ever. What Contacts knows survives the rebuild
+            // because `ContactsCollector` reads it back out of its own column, and
+            // `upsertSignals` leaves that column alone.
             var merged = LocalSignals(personId: personId)
             var errors: [String] = []
             var finishedStages: [String] = []

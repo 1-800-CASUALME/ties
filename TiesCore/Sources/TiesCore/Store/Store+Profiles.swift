@@ -88,6 +88,11 @@ extension Store {
             let signals = try signalRow.asSignals()
             parts += signals.aliases
             parts += signals.titles
+            // The address book's contribution sits in its own column until a collection pass
+            // folds it into the merged ones, and a nickname is exactly what someone searches by.
+            if let contacts = try signalRow.contacts() {
+                parts += contacts.aliases
+            }
         }
 
         let content = parts.joined(separator: "\n")
