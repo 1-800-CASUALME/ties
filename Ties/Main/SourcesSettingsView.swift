@@ -10,9 +10,6 @@ struct SourcesSettingsView: View {
     /// How often the rows re-check themselves while this pane is open.
     private static let recheckInterval = Duration.seconds(3)
 
-    /// The collection this pane started, kept so its stop button can reach it and so a second
-    /// "Collect again" can't start over the top of the first.
-    @State private var collector: SignalCollector?
     @State private var progress: ScanProgress?
     @State private var message: String?
 
@@ -40,10 +37,10 @@ struct SourcesSettingsView: View {
                     Button(action: collectAgain) {
                         Label("Collect again", systemImage: "arrow.clockwise")
                     }
-                    .disabled(collector != nil || model.storeFailure != nil)
+                    .disabled(model.settingsCollector != nil || model.storeFailure != nil)
                     .help("Read every source again for everyone")
 
-                    if let progress, collector != nil {
+                    if let progress, model.settingsCollector != nil {
                         pill(progress)
                     }
 
@@ -72,6 +69,9 @@ struct SourcesSettingsView: View {
         .formStyle(.grouped)
         .animation(.snappy, value: sources.needsAccess)
         .task { await recheckWhileVisible() }
+        // The run outlives this pane's `@State`, not the app: closing Settings mid-collection
+        // stops it rather than leaving it reading sources for a screen nobody can see.
+        .onDisappear { model.cancelSettingsCollection() }
     }
 
     /// How far the run has got, small enough to sit beside the button that started it.
@@ -107,7 +107,7 @@ struct SourcesSettingsView: View {
     /// Reads every enabled, ready source for everyone in the database. Tracked by `AppModel`, so
     /// "Delete Everything" stops it before it can write signals about people who have just gone.
     private func collectAgain() {
-        guard collector == nil else { return }
+        guard model.settingsCollector == nil else { return }
         message = nil
         model.track {
             do {
@@ -122,7 +122,7 @@ struct SourcesSettingsView: View {
                 await model.sources.refresh()
 
                 let collector = model.makeSignalCollector()
-                self.collector = collector
+                model.settingsCollector = collector
                 withAnimation(.snappy) { progress = ScanProgress(completed: 0, total: ids.count) }
 
                 for await update in await collector.run(personIds: ids) {
@@ -130,20 +130,35 @@ struct SourcesSettingsView: View {
                 }
 
                 let read = progress?.completed ?? 0
-                self.collector = nil
-                withAnimation(.snappy) { progress = nil }
+                finish(collector)
                 message = "Read your sources for \(read) \(read == 1 ? "person" : "people")."
             } catch {
-                self.collector = nil
+                // Only the people query throws, and it throws before anything is running — but
+                // the pane is put back to idle regardless rather than trusting that to stay true.
+                model.settingsCollector = nil
                 withAnimation(.snappy) { progress = nil }
                 message = error.localizedDescription
             }
         }
     }
 
-    /// Stops scheduling new people; whoever is in flight finishes and the stream ends by itself.
+    /// Stops scheduling new people; whoever is in flight finishes and the stream ends by
+    /// itself, which is what then clears the collector. Deliberately not
+    /// `cancelSettingsCollection()`: freeing the button before the run has actually drained
+    /// would let a second "Collect again" start on top of the first.
     private func stop() {
+        let collector = model.settingsCollector
         Task { await collector?.cancel() }
+    }
+
+    /// Puts the pane back to idle, but only if the run that just ended is still the one the
+    /// model is holding: a collection cancelled by closing Settings finishes draining after a
+    /// new one may already have been started, and must not clear that one.
+    private func finish(_ collector: SignalCollector) {
+        if model.settingsCollector === collector {
+            model.settingsCollector = nil
+        }
+        withAnimation(.snappy) { progress = nil }
     }
 
     /// Checks on arrival and every few seconds after, so a grant made in System Settings while

@@ -1,7 +1,7 @@
 import SwiftUI
 import TiesCore
 
-/// Third screen of setup: pick which of the imported contacts are worth researching.
+/// Fourth screen of setup: pick which of the imported contacts are worth researching.
 struct SelectView: View {
     @Environment(AppModel.self) private var model
     @Environment(WizardState.self) private var state

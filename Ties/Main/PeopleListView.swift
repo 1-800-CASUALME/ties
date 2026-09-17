@@ -34,6 +34,9 @@ struct PeopleListView: View {
     /// would actually use. Shown as chips under the field, and removable — a term the user
     /// takes off is a term the next search doesn't look for.
     @State private var expansion: [String] = []
+    /// The exact question `expansion` was produced for, so pressing Return on text that has
+    /// just been expanded doesn't ask the provider the same thing twice.
+    @State private var expandedQuery: String?
     @State private var errorMessage: String?
 
     private enum Mode {
@@ -236,6 +239,7 @@ struct PeopleListView: View {
         submitted = false
         results = []
         expansion = []
+        expandedQuery = nil
         errorMessage = nil
     }
 
@@ -259,6 +263,7 @@ struct PeopleListView: View {
             searching = false
             results = []
             expansion = []
+            expandedQuery = nil
             errorMessage = nil
             return
         }
@@ -267,8 +272,17 @@ struct PeopleListView: View {
         searching = true
         errorMessage = nil
         let search = model.search
-        let expander = expand ? try? model.makeExpander() : nil
-        if expand { expansion = [] }
+        // Return on text that has already been expanded — which is what pressing it after
+        // typing past a `?` does — searches again rather than paying for the same expansion a
+        // second time.
+        let alreadyExpanded = text == expandedQuery
+        let expander = (expand && !alreadyExpanded) ? try? model.makeExpander() : nil
+        // The old chips stay up until the new ones arrive: clearing them here made the strip
+        // flash empty on every keystroke of a question that is still being typed.
+        if expander == nil, expand, !alreadyExpanded {
+            expansion = []
+            expandedQuery = nil
+        }
         askTask = model.track {
             if debounced {
                 try? await Task.sleep(for: .milliseconds(350))
@@ -281,6 +295,7 @@ struct PeopleListView: View {
                 let terms = (try? await expander.expand(text)) ?? []
                 guard !Task.isCancelled, generation == askGeneration else { return }
                 expansion = terms
+                expandedQuery = text
             }
             do {
                 let hits = try await search.ask(text, limit: 50, terms: expansion)

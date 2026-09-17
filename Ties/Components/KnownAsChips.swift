@@ -19,7 +19,7 @@ struct KnownAsChips: View {
     var body: some View {
         if !chips.isEmpty {
             HStack(spacing: 6) {
-                ForEach(chips, id: \.self) { chip in
+                ForEach(chips) { chip in
                     capsule(chip)
                 }
             }
@@ -50,16 +50,31 @@ struct KnownAsChips: View {
     /// so is never crowded out by one.
     private var chips: [Chip] {
         var chips: [Chip] = []
-        for honorific in signals?.honorifics ?? [] {
+        for (index, honorific) in (signals?.honorifics ?? []).enumerated() {
             let title = Self.display(honorific)
-            chips.append(Chip(text: title, symbol: "person.text.rectangle", help: "Addressed as \(title)"))
+            chips.append(Chip(
+                id: "honorific-\(index)",
+                text: title,
+                symbol: "person.text.rectangle",
+                help: "Addressed as \(title)"
+            ))
         }
-        for alias in signals?.aliases ?? [] {
-            chips.append(Chip(text: alias, symbol: "person.text.rectangle", help: "Known as \(alias)"))
+        for (index, alias) in (signals?.aliases ?? []).enumerated() {
+            chips.append(Chip(
+                id: "alias-\(index)",
+                text: alias,
+                symbol: "person.text.rectangle",
+                help: "Known as \(alias)"
+            ))
         }
         chips = Array(chips.prefix(limit))
         if hasSelfLink {
-            chips.append(Chip(text: "", symbol: "link", help: "Verified by a link they shared themselves"))
+            chips.append(Chip(
+                id: "link",
+                text: "",
+                symbol: "link",
+                help: "Verified by a link they shared themselves"
+            ))
         }
         return chips
     }
@@ -81,7 +96,11 @@ struct KnownAsChips: View {
         }
     }
 
-    private struct Chip: Hashable {
+    /// Identified by where it came from rather than by what it says: two people in the same
+    /// address book can be "Dr", and a person can go by two spellings of one alias, which as a
+    /// `\.self` id made SwiftUI drop the duplicate.
+    private struct Chip: Identifiable, Hashable {
+        var id: String
         var text: String
         var symbol: String
         var help: String

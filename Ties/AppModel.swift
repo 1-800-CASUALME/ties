@@ -252,6 +252,9 @@ final class AppModel {
         for task in running {
             task.cancel()
         }
+        // Cancelling the task that started a collection doesn't reach the actor doing the
+        // reading, which owns a task of its own; it has to be told.
+        cancelSettingsCollection()
     }
 
     // MARK: - Erasing everything
@@ -576,6 +579,24 @@ final class AppModel {
     /// Held here because the wizard's Sources step and Settings › Sources show the same four
     /// rows, and `makeSignalCollector()` builds from exactly what they show.
     let sources = SourcesModel()
+
+    /// The collection Settings › Sources started, while one is running.
+    ///
+    /// Held here rather than in that pane's `@State` because the Settings window can be closed
+    /// — and rebuilt — while a run is in flight. A `SignalCollector` keeps its own internal
+    /// task, which does not inherit cancellation from whoever started it, so a view-owned
+    /// collector would go on reading Messages and Mail with nobody watching, and the next visit
+    /// to the pane would find an empty `@State` and happily start a second run over the top of
+    /// it.
+    var settingsCollector: SignalCollector?
+
+    /// Stops the Settings collection, if there is one. The pane calls this when it goes away,
+    /// and `cancelAllWork()` calls it before the database is emptied.
+    func cancelSettingsCollection() {
+        guard let collector = settingsCollector else { return }
+        settingsCollector = nil
+        Task { await collector.cancel() }
+    }
 
     /// The collector over every source worth running for this collection.
     ///

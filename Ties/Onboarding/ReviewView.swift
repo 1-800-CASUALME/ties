@@ -1,7 +1,7 @@
 import SwiftUI
 import TiesCore
 
-/// Fifth screen of setup: what the research found, one row per person, with the three tools for
+/// Seventh screen of setup: what the research found, one row per person, with the three tools for
 /// correcting it — see the sources it used, research that person again, or pick a different
 /// identity — before anything is written up.
 struct ReviewView: View {
@@ -363,22 +363,39 @@ struct ReviewView: View {
         // The automatic pass runs once per visit to this screen; the button is how to ask for
         // another one.
         guard again || !judgeRequested else { return }
-        judgeRequested = true
 
         let ids = unsure.filter { again || judgements[$0] == nil }
+        // Nothing was asked of the provider if there is nobody to ask about or no provider to
+        // ask, so the visit's one automatic pass is still unspent: a screen that arrives before
+        // its rows are loaded must be able to try again.
         guard !ids.isEmpty, let judge = try? model.makeJudge() else { return }
+        judgeRequested = true
 
         judging = true
         judged = 0
         judgeTotal = ids.count
+        // The same bookkeeping the scan and the extraction keep (§9): a `judge` job per person,
+        // so what this pass did is readable from the store afterwards rather than only from the
+        // view that ran it.
+        try? model.store.enqueue(kind: .judge, personIds: ids)
         judgeTask = model.track {
             for id in ids {
                 guard !Task.isCancelled else { break }
-                // A verdict that fails — a model that named a candidate nobody offered, a
-                // provider that timed out — costs that one row its chip, not the pass.
-                if let verdict = try? await judge.judge(personId: id) {
-                    try? model.store.upsertJudgement(verdict)
-                    judgements[id] = verdict
+                try? model.store.setJob(kind: .judge, personId: id, state: .running)
+                do {
+                    // A person the judge decides isn't worth asking about — the scorer settled
+                    // it after all — is skipped rather than failed: nothing went wrong.
+                    if let verdict = try await judge.judge(personId: id) {
+                        try model.store.upsertJudgement(verdict)
+                        judgements[id] = verdict
+                        try? model.store.setJob(kind: .judge, personId: id, state: .done)
+                    } else {
+                        try? model.store.setJob(kind: .judge, personId: id, state: .skipped)
+                    }
+                } catch {
+                    // A verdict that fails — a model that named a candidate nobody offered, a
+                    // provider that timed out — costs that one row its chip, not the pass.
+                    try? model.store.setJob(kind: .judge, personId: id, state: .failed, error: error.localizedDescription)
                 }
                 judged += 1
             }

@@ -5,7 +5,7 @@ import TiesCore
 /// The nine screens of first-run setup, in order. The raw values drive both `StepDots` and
 /// `next()`/`back()`.
 enum WizardStep: Int, CaseIterable {
-    case welcome, access, sources, select, scan, review, provider, extract, done
+    case welcome, access, sources, select, scan, provider, review, extract, done
 
     /// One word per step, for the tooltip on its dot.
     var title: String {
@@ -15,8 +15,8 @@ enum WizardStep: Int, CaseIterable {
         case .sources: "Sources"
         case .select: "Select"
         case .scan: "Research"
-        case .review: "Review"
         case .provider: "AI"
+        case .review: "Review"
         case .extract: "Extract"
         case .done: "Done"
         }

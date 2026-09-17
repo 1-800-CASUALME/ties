@@ -25,6 +25,9 @@ struct ScanView: View {
     @State private var people: [Person] = []
     /// The scan job state per person id, as of the last refresh.
     @State private var jobStates: [String: Job.State] = [:]
+    /// The collect job state per person id. Kept apart from the scan's: the two passes run over
+    /// the same people, and a person whose sources have been read is not thereby researched.
+    @State private var collectStates: [String: Job.State] = [:]
     /// Ids whose scan job has reached a terminal state, so their row can stop shimmering.
     @State private var done: Set<String> = []
     @State private var best: [String: Candidate] = [:]
@@ -272,17 +275,24 @@ struct ScanView: View {
         let collector = model.makeSignalCollector()
         state.collector = collector
         state.collectStartedAt = .now
-        state.collectProgress = ScanProgress(completed: 0, total: pendingOrder.count)
+        let pending = pendingCollection
+        state.collectProgress = ScanProgress(completed: 0, total: pending.count)
         collecting = true
 
-        for await progress in await collector.run(personIds: pendingOrder) {
+        // Whatever ends this — the stream running out, the screen going away, a jump to another
+        // step — leaves the screen saying the same thing: nothing is collecting. Returning out
+        // of the loop without this left the wizard holding a spent collector and the caption
+        // stuck on a pass that had stopped.
+        defer {
+            state.collector = nil
+            collecting = false
+        }
+
+        for await progress in await collector.run(personIds: pending) {
             guard !Task.isCancelled else { return }
             state.collectProgress = progress
             noteFirstEvent()
         }
-
-        state.collector = nil
-        collecting = false
     }
 
     /// Stops reading the local sources. Whoever is in flight finishes, the stream ends, and the
@@ -342,6 +352,13 @@ struct ScanView: View {
     /// worth another try, which is exactly what a different engine is for.
     private var pendingOrder: [String] {
         scanOrder.filter { jobStates[$0] != .done }
+    }
+
+    /// Who still needs their sources read. The collection keeps its own jobs, so this asks
+    /// those: filtering on the scan's jobs made re-entering Research read Messages and Mail
+    /// again for everyone it had already read them for.
+    private var pendingCollection: [String] {
+        scanOrder.filter { collectStates[$0] != .done }
     }
 
     private func pause() {
@@ -421,6 +438,10 @@ struct ScanView: View {
         let jobs = try model.store.jobs(kind: .scan)
         jobStates = Dictionary(
             jobs.map { ($0.personId, $0.state) },
+            uniquingKeysWith: { _, latest in latest }
+        )
+        collectStates = Dictionary(
+            try model.store.jobs(kind: .collect).map { ($0.personId, $0.state) },
             uniquingKeysWith: { _, latest in latest }
         )
         done = Set(
