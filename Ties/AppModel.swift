@@ -22,6 +22,7 @@ final class AppModel {
         static let searchPoolSize = "searchPoolSize"
         static let scanMode = "scanMode"
         static let providerConfigPrefix = "providerConfig."
+        static let shareSignals = "ai.shareSignals"
     }
 
     let store: Store
@@ -133,6 +134,9 @@ final class AppModel {
         self.scanMode = defaults.string(forKey: Keys.scanMode).flatMap(ScanMode.init(rawValue:)) ?? .quick
         self.setupCompleted = defaults.bool(forKey: Keys.hasCompletedSetup)
         self.providerId = defaults.string(forKey: Keys.selectedProviderId)
+        // Off until the user says otherwise: a missing key means a cloud provider has never
+        // been allowed near the signals collected from this Mac (§7.5).
+        self.signalsShared = defaults.bool(forKey: Keys.shareSignals)
     }
 
     // MARK: - Opening the database
@@ -289,7 +293,10 @@ final class AppModel {
         defaults.removeObject(forKey: Keys.searchPoolSize)
         defaults.removeObject(forKey: Keys.scanMode)
         defaults.removeObject(forKey: Keys.hasCompletedSetup)
+        defaults.removeObject(forKey: Keys.shareSignals)
 
+        signalsShared = false
+        smartLists = []
         providerId = nil
         searchBackendId = "duckduckgo"
         searchPoolSize = AppModel.defaultPoolSize
@@ -375,8 +382,73 @@ final class AppModel {
     private static let poolBackendId = "pool"
     private static let webBackendId = "duckduckgo"
 
-    func makeExtractor() throws -> Extractor {
-        Extractor(store: store, provider: try makeProvider(), embedder: embedder)
+    /// The extractor, fact-checking by default (§7.6): a second pass costs one more call per
+    /// person and is what puts the dotted underline under a claim the sources don't back.
+    func makeExtractor(factCheck: Bool = true) throws -> Extractor {
+        Extractor(store: store, provider: try makeProvider(), embedder: embedder, factCheck: factCheck)
+    }
+
+    // MARK: - AI features
+
+    /// Whether a cloud provider may see the signals collected from this Mac — aliases, titles,
+    /// companies, honorifics, and nothing else (§7.5). Off until the user turns it on, and read
+    /// by `makeJudge()` and `makeDrafter()`, which is where the rule is actually applied: the
+    /// on-device model is never gated by it.
+    var shareSignals: Bool {
+        get { signalsShared }
+        set {
+            signalsShared = newValue
+            defaults.set(newValue, forKey: Keys.shareSignals)
+        }
+    }
+
+    /// The smart lists as the sidebar and the Done screen show them. Held here rather than read
+    /// per view because two screens draw them and a refresh started on one has to land on the
+    /// other.
+    private(set) var smartLists: [SmartList] = []
+    /// Whether a regrouping is in flight, so the sidebar's refresh button can say so.
+    private(set) var smartListsRefreshing = false
+
+    private var signalsShared: Bool
+
+    func makeJudge() throws -> CandidateJudge {
+        CandidateJudge(store: store, provider: try makeProvider(), shareSignals: shareSignals)
+    }
+
+    func makeSmartListBuilder() throws -> SmartListBuilder {
+        SmartListBuilder(store: store, provider: try makeProvider())
+    }
+
+    func makeExpander() throws -> QueryExpander {
+        QueryExpander(provider: try makeProvider())
+    }
+
+    func makeDrafter() throws -> MessageDrafter {
+        MessageDrafter(provider: try makeProvider(), shareSignals: shareSignals)
+    }
+
+    /// Re-reads the saved smart lists. Cheap enough for any screen that shows them to call on
+    /// appear, which is how a window opened after a regrouping catches up with it.
+    func loadSmartLists() {
+        smartLists = (try? store.smartLists()) ?? []
+    }
+
+    /// Regroups the network in the background and keeps what comes back — unless nothing does:
+    /// an empty answer replaces nothing, so a refresh the model fumbles (or one with no
+    /// provider configured at all) leaves the lists already on screen alone.
+    ///
+    /// Silent by design. This is the one piece of AI that runs without the user asking for it,
+    /// on the way out of extraction, and a failure there is not worth a dialog about.
+    func refreshSmartLists() {
+        guard !smartListsRefreshing else { return }
+        guard let builder = try? makeSmartListBuilder() else { return }
+        smartListsRefreshing = true
+        track {
+            defer { self.smartListsRefreshing = false }
+            guard let lists = try? await builder.build(), !lists.isEmpty else { return }
+            try? self.store.replaceSmartLists(lists)
+            self.loadSmartLists()
+        }
     }
 
     // MARK: - Provider detection and configuration

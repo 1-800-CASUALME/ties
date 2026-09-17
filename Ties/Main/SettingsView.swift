@@ -214,6 +214,7 @@ private struct ProviderSettingsView: View {
 
             if let selectedSpec {
                 ProviderFields(spec: selectedSpec)
+                privacyRow(selectedSpec)
             }
 
             Divider()
@@ -225,6 +226,43 @@ private struct ProviderSettingsView: View {
         }
         .padding(20)
         .task { await detectAll() }
+    }
+
+    /// The privacy switch (§7.5), next to the provider it is about. Off, a cloud provider gets
+    /// public snippets and Contacts-level facts only; the judge, the expansion and the drafting
+    /// run without the signals this Mac collected, and a draft gets no register sample.
+    ///
+    /// The lock says what the switch means for *this* provider: Apple Intelligence runs on this
+    /// Mac, so nothing leaves it whatever the switch says, and the lock is open because the
+    /// signals are in fact available to it.
+    private func privacyRow(_ spec: ProviderSpec) -> some View {
+        let open = model.shareSignals || spec.tier == .onDevice
+        let explanation = spec.tier == .onDevice
+            ? "\(spec.name) runs on this Mac, so your signals never leave it."
+            : open
+                ? "Aliases, titles, companies and honorifics are sent to \(spec.name). Never a message, a subject line, or your address book."
+                : "\(spec.name) sees public snippets and Contacts details only."
+
+        return HStack(spacing: 10) {
+            Image(systemName: open ? "lock.open" : "lock")
+                .foregroundStyle(open ? .secondary : Color.accentColor)
+                .help(explanation)
+                .accessibilityLabel(explanation)
+
+            Toggle("Let cloud AI see local signals", isOn: shareSignals)
+                .toggleStyle(.switch)
+                .help(explanation)
+
+            Spacer(minLength: 0)
+        }
+        .animation(.snappy, value: open)
+    }
+
+    private var shareSignals: Binding<Bool> {
+        Binding(
+            get: { model.shareSignals },
+            set: { model.shareSignals = $0 }
+        )
     }
 
     /// Probes every catalogue entry at once rather than in sequence: the slowest rules shell out
