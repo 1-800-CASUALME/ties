@@ -222,4 +222,19 @@ final class SourcesModel {
         guard let url = URL(string: SourcesModel.privacySettingsURL) else { return }
         NSWorkspace.shared.open(url)
     }
+
+    /// Shows the running copy of Ties in Finder, so the one dragged into Full Disk Access is the
+    /// one that is actually running. macOS grants access to a particular copy of an app: a build
+    /// sitting in a developer folder and a copy in Applications are two different apps to it.
+    func revealApp() {
+        NSWorkspace.shared.activateFileViewerSelecting([Bundle.main.bundleURL])
+    }
+
+    /// Where this copy of Ties is running from, shortened for display. Worth showing when access
+    /// is refused: it is usually the answer to "but I did grant it".
+    var appLocation: String {
+        let path = Bundle.main.bundleURL.path
+        let home = NSHomeDirectory()
+        return path.hasPrefix(home) ? "~" + path.dropFirst(home.count) : path
+    }
 }

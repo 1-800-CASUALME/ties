@@ -69,15 +69,32 @@ struct SourcesView: View {
     /// user has asked for is actually locked.
     private var accessPrompt: some View {
         VStack(spacing: 6) {
-            Button { sources.openPrivacySettings() } label: {
-                Label("Open Privacy Settings", systemImage: "lock.open")
-            }
-            .controlSize(.large)
-            .help("Open Full Disk Access in System Settings")
+            HStack(spacing: 8) {
+                Button { sources.openPrivacySettings() } label: {
+                    Label("Open Privacy Settings", systemImage: "lock.open")
+                }
+                .controlSize(.large)
+                .help("Open Full Disk Access in System Settings")
 
-            Text("Add Ties in Full Disk Access, then come back.")
+                Button { sources.revealApp() } label: {
+                    Label("Show This Copy", systemImage: "folder")
+                }
+                .controlSize(.large)
+                .help("Reveal the running copy of Ties, so you add the right one")
+            }
+
+            Text("Drag this copy into Full Disk Access, switch it on, then quit and reopen Ties.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+
+            // The usual reason a grant "does not work": the copy in the list is a different build
+            // from the one running. Naming the path is faster than any explanation.
+            Text(sources.appLocation)
+                .font(.caption2.monospaced())
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
         }
         .transition(.opacity)
     }

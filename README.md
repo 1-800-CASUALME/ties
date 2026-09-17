@@ -49,10 +49,21 @@ you grant Full Disk Access, and Contacts needs its own permission.
 
 Contacts needs nothing extra. Messages, WhatsApp and Mail live behind Full Disk Access:
 
-1. On the Sources step, or in Settings › Sources, click **Open Privacy Settings**.
-2. In Privacy & Security › Full Disk Access, switch **Ties** on. macOS may ask to quit and reopen it.
-3. Back in Ties, the rows turn green. Continue works either way — a source that is off simply
-   contributes nothing.
+1. Move Ties to your Applications folder first, and grant access to that copy. macOS grants Full
+   Disk Access to one particular copy of an app, so a copy on your Desktop, in Downloads, or in a
+   build folder is a different app as far as the system is concerned.
+2. On the Sources step, or in Settings › Sources, click **Show This Copy** and then **Open Privacy
+   Settings**, and drag the revealed app into the Full Disk Access list (or switch on the **Ties**
+   already there, if it is the same copy — the Sources screen prints the path it is running from).
+3. Quit Ties and open it again. macOS only reads this permission when an app launches, so a grant
+   made while Ties is running does nothing until the next launch. This is the usual reason it looks
+   like the switch did not work.
+4. The rows turn green. Continue works either way — a source that is off simply contributes nothing.
+
+If you build Ties yourself, expect to repeat this after a rebuild: an unsigned build gets a new
+identity every time it is compiled, and the old grant no longer matches. Signing the app with a
+certificate that stays the same, or downloading the released DMG and leaving that copy in place,
+avoids it.
 
 Ties never opens the live chat or mail store. It copies the file to a temporary folder, opens the
 copy read-only, reads at most the last 500 messages a person and the 50 most recent mails an

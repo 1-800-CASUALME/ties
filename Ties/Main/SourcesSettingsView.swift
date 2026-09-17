@@ -47,6 +47,11 @@ struct SourcesSettingsView: View {
                     Spacer()
 
                     if sources.needsAccess {
+                        Button { sources.revealApp() } label: {
+                            Label("Show This Copy", systemImage: "folder")
+                        }
+                        .help("Reveal the running copy of Ties, so you add the right one")
+
                         Button { sources.openPrivacySettings() } label: {
                             Label("Open Privacy Settings", systemImage: "lock.open")
                         }
@@ -60,7 +65,7 @@ struct SourcesSettingsView: View {
                 }
             } footer: {
                 Text(sources.needsAccess
-                    ? "Add Ties in Full Disk Access, then come back."
+                    ? "Drag this copy into Full Disk Access, switch it on, then quit and reopen Ties — macOS grants access to one copy of an app, and only reads it at launch. This one is at \(sources.appLocation)."
                     : "A fresh pass reads each source from the beginning and replaces what the last one found.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
