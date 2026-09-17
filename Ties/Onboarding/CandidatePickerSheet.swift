@@ -15,6 +15,9 @@ struct CandidatePickerSheet: View {
     /// re-read from the store (with the evidence) as soon as it appears.
     @State private var candidates: [Candidate]
     @State private var evidence: [String: [Evidence]] = [:]
+    /// The provider's verdict for this person, if it was asked (§7.1). It marks one row; it
+    /// never chooses it.
+    @State private var judgement: Judgement?
     @State private var errorMessage: String?
 
     let onChoose: (Candidate?) -> Void
@@ -104,6 +107,10 @@ struct CandidatePickerSheet: View {
                     }
                 }
 
+                if let judgement, judgement.candidateId == candidate.id {
+                    SparkleChip(reason: judgement.reason)
+                }
+
                 if let headline = candidate.headline, !headline.isEmpty {
                     Text(headline)
                         .font(.caption)
@@ -178,6 +185,7 @@ struct CandidatePickerSheet: View {
                     .sorted(by: Self.strongestFirst)
             }
             evidence = byCandidate
+            judgement = try model.store.judgement(personId: person.id)
             errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription
