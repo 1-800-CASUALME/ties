@@ -114,6 +114,86 @@ private let threeEngines = [testEngine("one"), testEngine("two"), testEngine("th
     await #expect(throws: SearchBackendError.self) { _ = try await pool.search("q") }
 }
 
+/// A worker that records how many queries it is answering at the same time — the one thing
+/// "a worker is given one query at a time" is really about.
+final class OverlapWorker: SearchBackend, @unchecked Sendable {
+    let id: String
+    private let lock = NSLock()
+    private var running = 0
+    private var peak = 0
+    private var answered = 0
+
+    init(id: String) {
+        self.id = id
+    }
+
+    /// The most queries this worker ever had in flight at once.
+    var maxOverlap: Int {
+        lock.withLock { peak }
+    }
+
+    var callCount: Int {
+        lock.withLock { answered }
+    }
+
+    func search(_ query: String) async throws -> [SearchHit] {
+        enter()
+        defer { leave() }
+        try await Task.sleep(for: .milliseconds(20))
+        return [SearchHit(url: "https://example.com/\(id)", title: query, snippet: "")]
+    }
+
+    private func enter() {
+        lock.withLock {
+            running += 1
+            answered += 1
+            peak = max(peak, running)
+        }
+    }
+
+    private func leave() {
+        lock.withLock { running -= 1 }
+    }
+}
+
+@Test func aWorkerIsNeverGivenTwoQueriesAtOnce() async throws {
+    // The app runs `2 × poolSize` people at a time, so this is the ordinary case rather than a
+    // corner one: six callers, two web views.
+    let workers = ["a", "b"].map { OverlapWorker(id: $0) }
+    let pool = SearchPool(workers: workers, engines: threeEngines)
+
+    let hits = try await withThrowingTaskGroup(of: Int.self) { group in
+        for index in 0..<6 {
+            group.addTask { try await pool.search("q\(index)").count }
+        }
+        var total = 0
+        for try await count in group { total += count }
+        return total
+    }
+
+    // Every query was answered, and no web view was ever asked two things at once.
+    #expect(hits == 6)
+    #expect(workers.map(\.maxOverlap) == [1, 1])
+    #expect(workers.reduce(0) { $0 + $1.callCount } == 6)
+}
+
+@Test func aQueryWaitingForAWorkerGivesUpWhenItsCallerIsCancelled() async throws {
+    let worker = BlockingWorker()
+    let pool = SearchPool(workers: [worker], engines: threeEngines)
+
+    let first = Task { try await pool.search("holds the worker") }
+    while !worker.started { await Task.yield() }
+
+    // The only worker is taken, so this one parks inside the pool rather than piling onto it.
+    let queued = Task { try await pool.search("waits for it") }
+    await Task.yield()
+    queued.cancel()
+    await #expect(throws: CancellationError.self) { try await queued.value }
+
+    first.cancel()
+    await #expect(throws: CancellationError.self) { try await first.value }
+}
+
 // MARK: - Failover
 
 @Test func aChallengedWorkerIsSkippedForTheCooldownAndTheQueryRetriedOnAnother() async throws {
