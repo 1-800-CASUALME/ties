@@ -125,6 +125,23 @@ enum Migrations {
             }
         }
 
+        // v2 was edited during 0.2's development, so a database from an earlier dev build has the
+        // table without the columns added later. Migrations never re-run, so the missing ones are
+        // added here; on a database created by the final v2 there is nothing to do.
+        migrator.registerMigration("v3") { db in
+            let existing = Set(try db.columns(in: "signal").map(\.name))
+            for column in ["strongAliases", "honorificsAsWritten"] where !existing.contains(column) {
+                try db.alter(table: "signal") { t in
+                    t.add(column: column, .text).notNull().defaults(to: "[]")
+                }
+            }
+            if !existing.contains("contactsSignals") {
+                try db.alter(table: "signal") { t in
+                    t.add(column: "contactsSignals", .text)
+                }
+            }
+        }
+
         return migrator
     }
 }

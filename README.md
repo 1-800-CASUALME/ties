@@ -57,8 +57,8 @@ Contacts needs nothing extra. Messages, WhatsApp and Mail live behind Full Disk 
 Ties never opens the live chat or mail store. It copies the file to a temporary folder, opens the
 copy read-only, reads at most the last 500 messages a person and the 50 most recent mails an
 address, and deletes the copy when the pass ends. Nothing is written back to Messages, WhatsApp,
-Mail or Contacts, and nothing read from them is uploaded. Revoke Full Disk Access whenever you
-like; Ties carries on with what the web says.
+Mail or Contacts. What is read stays on this Mac except where the Privacy section says otherwise.
+Revoke Full Disk Access whenever you like; Ties carries on with what the web says.
 
 ## AI
 
@@ -81,9 +81,10 @@ sparkle, can be dismissed, and runs through the provider you chose — on-device
 
 Settings › Providers holds one switch: **Let cloud AI see local signals**, off by default. Off, a
 cloud provider sees only public pages and what Apple Contacts holds. On, it also sees the aliases,
-titles, companies and honorifics collected from your Mac — never a message, a subject line, a phone
-number or an email address. Apple Intelligence runs on this Mac and is never gated. The switch
-shows as a lock next to the provider tile.
+titles, companies and honorifics collected from your Mac, and — when you ask for a draft — your own
+last twenty messages to that person, so the draft sounds like you. It never sees a message someone
+sent you, a subject line, or your address book. Apple Intelligence runs on this Mac and is never
+gated. The switch shows as a lock next to the provider tile.
 
 ## How long does research take?
 
@@ -151,9 +152,9 @@ of which are the feature working. First, searching: a name, an employer, a job t
 name someone goes by can appear in a web search, the same way a contact's name and company already
 did in 0.1 — that is how a person is found at all. Second, the AI: with "Let cloud AI see local
 signals" switched off, a cloud provider is sent only what your address book already held; switch it
-on and it also sees aliases, titles, companies and honorifics. Either way it is never sent a
-message, a subject line, or your address book, and Apple Intelligence on this Mac sends nothing
-anywhere. Ties opens your Messages, WhatsApp and Mail stores read-only, from a temporary copy, and
+on and it also sees aliases, titles, companies and honorifics, plus — only when you ask for a draft
+— your own last twenty messages to that person. It is never sent a message anyone sent you, a
+subject line, or your address book, and Apple Intelligence on this Mac sends nothing anywhere. Ties opens your Messages, WhatsApp and Mail stores read-only, from a temporary copy, and
 never modifies them. Full Disk Access can be revoked at any time; Ties keeps working with what the
 web says.
 

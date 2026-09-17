@@ -127,3 +127,39 @@ import GRDB
     #expect(try store.judgement(personId: p.id) == nil)
     #expect(try store.ftsSearch("cardiologist").map(\.personId) == [p.id])
 }
+
+@Test func migrationV3AddsColumnsAnEarlyV2Missed() throws {
+    // A database from a dev build that ran the first version of v2: real v1 schema, a `signal`
+    // table without the three columns added later, and v2 recorded as applied so it never re-runs.
+    let url = tmp().appendingPathComponent("early-v2.sqlite")
+    let queue = try DatabaseQueue(path: url.path)
+    try Migrations.migrator.migrate(queue, upTo: "v1")
+    try queue.write { db in
+        try db.execute(sql: """
+            CREATE TABLE signal (personId TEXT PRIMARY KEY REFERENCES person(id) ON DELETE CASCADE,
+                aliases TEXT NOT NULL DEFAULT '[]', honorifics TEXT NOT NULL DEFAULT '[]',
+                titles TEXT NOT NULL DEFAULT '[]', companies TEXT NOT NULL DEFAULT '[]',
+                links TEXT NOT NULL DEFAULT '[]', phones TEXT NOT NULL DEFAULT '[]',
+                emails TEXT NOT NULL DEFAULT '[]', sources TEXT NOT NULL DEFAULT '[]',
+                location TEXT, lastContact DATETIME, interactions INTEGER NOT NULL DEFAULT 0,
+                collectedAt DATETIME NOT NULL);
+            CREATE TABLE smartList (id TEXT PRIMARY KEY, name TEXT NOT NULL,
+                systemImage TEXT NOT NULL, personIds TEXT NOT NULL, createdAt DATETIME NOT NULL);
+            CREATE TABLE judgement (personId TEXT PRIMARY KEY REFERENCES person(id) ON DELETE CASCADE,
+                candidateId TEXT NOT NULL, confidence DOUBLE NOT NULL, reason TEXT NOT NULL,
+                providerId TEXT NOT NULL, judgedAt DATETIME NOT NULL);
+            INSERT INTO grdb_migrations (identifier) VALUES ('v2');
+            """)
+    }
+    try queue.close()
+
+    // Opening the store must add the missing columns rather than fail on the first write.
+    let store = try Store.open(at: url)
+    let person = Person(givenName: "Sara", familyName: "Ahmed")
+    try store.upsertPeople([person], channels: [])
+    try store.upsertSignals(LocalSignals(personId: person.id, aliases: ["Dr. Sara"],
+                                         strongAliases: ["Dr. Sara"], honorificsAsWritten: ["دكتور"]))
+    let read = try #require(try store.signals(personId: person.id))
+    #expect(read.strongAliases == ["Dr. Sara"])
+    #expect(read.honorificsAsWritten == ["دكتور"])
+}
