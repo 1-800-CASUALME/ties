@@ -318,3 +318,39 @@ private final class CountingProvider: LookupProvider, @unchecked Sendable {
         #expect(LookupCatalog.secretAccount(spec.id).hasPrefix("lookup."))
     }
 }
+
+// MARK: - Inside a real pass
+
+@Test func aLookupRunsInsideACollectionPassAndReachesTheStore() async throws {
+    let store = try Store.inMemory()
+    let sara = Person(givenName: "Sara", familyName: "Ahmed")
+    let omar = Person(givenName: "Omar", familyName: "Ali")
+    try store.upsertPeople([sara, omar], channels: [
+        Channel(personId: sara.id, kind: .phone, value: "+966501234567", normalized: "+966501234567"),
+        Channel(personId: omar.id, kind: .email, value: "omar@example.com", normalized: "omar@example.com"),
+    ])
+
+    let provider = CountingProvider(answer: LookupResult(
+        names: [LookupName(value: "Dr Sara", kind: .crowd, count: 9)],
+        tags: ["Cardiologist"],
+        providerId: "counting"
+    ))
+    let collector = SignalCollector(
+        store: store,
+        collectors: [LookupCollector(provider: provider, budget: LookupBudget(limit: 50))]
+    )
+
+    for await _ in await collector.run(personIds: [sara.id, omar.id]) {}
+
+    let rows = try store.signalsByPerson()
+    #expect(rows[sara.id]?.aliases == ["Dr Sara"])
+    #expect(rows[sara.id]?.honorifics == ["dr"])
+    #expect(rows[sara.id]?.titles == ["Cardiologist"])
+    #expect(rows[sara.id]?.sources == ["lookup"])
+    // A crowd name never counts as strong, however many people agree on it.
+    #expect(rows[sara.id]?.strongAliases.isEmpty == true)
+    // Omar has no number, so nothing was asked about him and nothing was charged.
+    #expect(rows[omar.id]?.aliases.isEmpty == true)
+    #expect(provider.calls == ["+966501234567"])
+    #expect(try store.counts(kind: .collect)[.done] == 2)
+}
