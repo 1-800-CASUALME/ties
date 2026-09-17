@@ -600,18 +600,28 @@ final class AppModel {
 
     /// The collector over every source worth running for this collection.
     ///
-    /// Contacts is always in it: it reads back what the address book already wrote into the
-    /// database, so there is nothing to grant and nothing to open. Every other source has to be
-    /// both switched on and `ready` — a source that is off, not installed, or still locked
-    /// behind Full Disk Access is simply left out, which is how a run stays quiet about it
-    /// instead of failing once per person.
+    /// Every source has to be switched on, Contacts included: its row draws the same switch as
+    /// the others, and a privacy control that quietly does nothing is worse than one the user
+    /// can turn back on. The file sources have to be `ready` as well — off, not installed, or
+    /// still locked behind Full Disk Access is simply left out, which is how a run stays quiet
+    /// about it instead of failing once per person.
+    ///
+    /// With everything off the collection still runs: each person's signal row is rebuilt from
+    /// no sources at all, which empties it, rather than the pass failing.
     ///
     /// Statuses come from the last `sources.refresh()`; the screens that start a collection
     /// refresh immediately before asking for this.
     func makeSignalCollector() -> SignalCollector {
-        var collectors: [any SourceCollector] = [ContactsCollector(store: store)]
-        for source in SourcesModel.all where source.id != SourcesModel.contactsId {
-            guard sources.isEnabled(source.id), sources.statuses[source.id] == .ready else { continue }
+        var collectors: [any SourceCollector] = []
+        for source in SourcesModel.all {
+            guard sources.isEnabled(source.id) else { continue }
+            if source.id == SourcesModel.contactsId {
+                // Contacts has no status to satisfy: it reads what the address book already
+                // wrote into the database, so there is nothing to grant and nothing to open.
+                collectors.append(ContactsCollector(store: store))
+                continue
+            }
+            guard sources.statuses[source.id] == .ready else { continue }
             guard let collector = SourcesModel.fileCollector(source.id, userNames: sources.userNames) else { continue }
             collectors.append(collector)
         }
