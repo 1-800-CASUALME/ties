@@ -38,6 +38,7 @@ logos=(
   "jan jan"
   "gpt4all gpt4all"
   "openai openai"
+  "twilio twilio"
   "anthropic anthropic"
   "perplexity perplexity-color"
   "xai xai"

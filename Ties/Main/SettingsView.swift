@@ -3,7 +3,8 @@ import SwiftUI
 import TiesCore
 
 /// The Settings scene: where the database lives and what to do with it, which AI reads the
-/// pages, and which search engine finds them.
+/// pages, which search engine finds them, what this Mac is allowed to read, and — empty until
+/// somebody fills it — which outside service may be asked whose number this is.
 struct SettingsView: View {
     var body: some View {
         TabView {
@@ -15,6 +16,8 @@ struct SettingsView: View {
                 .tabItem { Label("Research", systemImage: "magnifyingglass") }
             SourcesSettingsView()
                 .tabItem { Label("Sources", systemImage: "tray.full") }
+            LookupSettingsView()
+                .tabItem { Label("Lookup", systemImage: "antenna.radiowaves.left.and.right") }
         }
         .frame(width: 600, height: 480)
     }

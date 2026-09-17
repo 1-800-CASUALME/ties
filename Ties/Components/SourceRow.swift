@@ -77,7 +77,7 @@ struct SourceRow: View {
         case .needsAccess:
             return ("lock.fill", .orange, "Needs Full Disk Access")
         case .unavailable:
-            return ("minus.circle", .secondary, "Not installed")
+            return ("minus.circle", .secondary, source.unavailableHelp)
         case .error(let message):
             return ("exclamationmark.triangle.fill", .yellow, message)
         }
