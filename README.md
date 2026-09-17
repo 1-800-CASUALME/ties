@@ -38,7 +38,8 @@ Requires macOS 15 or later. Apple Intelligence as a provider needs macOS 26 on a
 
 Ties reads four places on this Mac. Each one is optional and shown as a row on the **Sources** step
 of the wizard and in Settings › Sources, where you can switch any of them off. Nothing is read until
-you grant Full Disk Access, and Contacts needs its own permission.
+you grant Full Disk Access, and Contacts needs its own permission. A fifth row, **Lookup**, is not
+read on this Mac at all — see [Lookup](#lookup) — and is off until you set it up.
 
 | Source | What it adds |
 | --- | --- |
@@ -70,6 +71,33 @@ copy read-only, reads at most the last 500 messages a person and the 50 most rec
 address, and deletes the copy when the pass ends. Nothing is written back to Messages, WhatsApp,
 Mail or Contacts. What is read stays on this Mac except where the Privacy section says otherwise.
 Revoke Full Disk Access whenever you like; Ties carries on with what the web says.
+
+## Lookup
+
+Everything above is something your Mac already has. Lookup is the one thing that isn't: a service
+you choose, that answers *whose number is this, and what do other people call it?*
+
+Ties ships no such database and integrates with no crowd-sourced one. Those databases exist because
+every user uploads their whole address book — which is how your friends' names got into one without
+ever agreeing to it, and it is the one thing Ties promises never to do. What Ties ships is the slot:
+
+| Service | What it answers |
+| --- | --- |
+| Twilio Lookup | The name registered to the line (CNAM, United States only), plus carrier and line type worldwide. Documented, paid per lookup, your own key. |
+| Custom | Any HTTP service you already have access to. You give the URL, the header your key goes in, and where the names and labels sit in the answer. No code. |
+
+The custom slot is the honest answer to "there must be a way": if you have your own access to a
+service — a business account, an API key, anything with an HTTP endpoint — you describe it in
+Settings › Lookup and Ties uses it. Ties will not reverse-engineer a phone app's private API to get
+at a database you have not been given access to.
+
+What comes back is used the way it deserves. A name **registered to the line** counts as strongly as
+a name someone set on their own WhatsApp account: it can settle which web profile is theirs. A name
+**other people saved** becomes a "known as" chip and an honorific — "Dr", "م", "Eng." — that seeds
+better searches, and never accepts a profile on its own. Numbers are asked about once each however
+many contacts share them, at most two per person, and never more than the per-pass cap you set,
+because a lookup is billed per call. Settings › Lookup has a **Try a number** box that shows you
+exactly what a service answers before you spend anything across your whole address book.
 
 ## AI
 
@@ -165,7 +193,14 @@ did in 0.1 — that is how a person is found at all. Second, the AI: with "Let c
 signals" switched off, a cloud provider is sent only what your address book already held; switch it
 on and it also sees aliases, titles, companies and honorifics, plus — only when you ask for a draft
 — your own last twenty messages to that person. It is never sent a message anyone sent you, a
-subject line, or your address book, and Apple Intelligence on this Mac sends nothing anywhere. Ties opens your Messages, WhatsApp and Mail stores read-only, from a temporary copy, and
+subject line, or your address book, and Apple Intelligence on this Mac sends nothing anywhere.
+
+There is a third exception, and it only exists if you switch it on: **Lookup** sends a contact's
+phone number to the service you chose, because asking whose number it is means saying which number.
+It ships off, it stays off until you have picked a service and given it your own key, and switching
+the Lookup row off stops it. Nothing else about a person is sent with the number.
+
+Ties opens your Messages, WhatsApp and Mail stores read-only, from a temporary copy, and
 never modifies them. Full Disk Access can be revoked at any time; Ties keeps working with what the
 web says.
 

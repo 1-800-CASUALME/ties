@@ -18,7 +18,7 @@ struct SourcesSettingsView: View {
     var body: some View {
         Form {
             Section {
-                ForEach(SourcesModel.all) { source in
+                ForEach(SourcesModel.allWithLookup) { source in
                     SourceRow(
                         source: source,
                         icon: sources.icon(for: source),
@@ -27,7 +27,7 @@ struct SourcesSettingsView: View {
                     )
                 }
             } footer: {
-                Text("Everything here is read on this Mac, in a copy, and never written back or sent anywhere. Messages, WhatsApp and Mail need Full Disk Access; Contacts is whatever the address book already gave.")
+                Text("The first four are read on this Mac, in a copy, and never written back or sent anywhere; Messages, WhatsApp and Mail need Full Disk Access. Lookup is the exception — it asks an outside service whose number this is, so it stays off until you set one up in the Lookup tab.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

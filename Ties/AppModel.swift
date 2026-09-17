@@ -302,6 +302,10 @@ final class AppModel {
         for key in defaults.dictionaryRepresentation().keys where key.hasPrefix("sources.") {
             defaults.removeObject(forKey: key)
         }
+        // The lookup slot goes with them: which service, the endpoint it was told about, and
+        // how many calls a pass was allowed. Its keys are in the Keychain, which
+        // `Keychain.deleteAll()` has already emptied.
+        LookupSettings.clear(defaults)
 
         signalsShared = false
         smartLists = []
@@ -613,8 +617,19 @@ final class AppModel {
     /// refresh immediately before asking for this.
     func makeSignalCollector() -> SignalCollector {
         var collectors: [any SourceCollector] = []
-        for source in SourcesModel.all {
+        for source in SourcesModel.allWithLookup {
             guard sources.isEnabled(source.id) else { continue }
+            if source.id == LookupCollector.sourceId {
+                // A budget per pass, not per person: the cap the user set is what one run of
+                // "collect again" may spend in total, and the cache inside it is what stops a
+                // number two contacts share being paid for twice.
+                guard let provider = LookupSettings.makeProvider(client: http, defaults: defaults) else { continue }
+                collectors.append(LookupCollector(
+                    provider: provider,
+                    budget: LookupBudget(limit: LookupSettings.budget(defaults))
+                ))
+                continue
+            }
             if source.id == SourcesModel.contactsId {
                 // Contacts has no status to satisfy: it reads what the address book already
                 // wrote into the database, so there is nothing to grant and nothing to open.

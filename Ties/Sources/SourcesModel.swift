@@ -26,6 +26,12 @@ final class SourcesModel {
         let appPaths: [String]
         /// Drawn instead of the app icon when the app isn't on this Mac.
         let fallbackSymbol: String
+        /// Whether a Mac that has never been asked reads this source. True for everything that
+        /// is read on this Mac; false for the one that isn't.
+        var defaultsOn = true
+        /// What the row's grey glyph means for this source. "Not installed" is right for an app;
+        /// a service that hasn't been set up yet is not missing, it is unconfigured.
+        var unavailableHelp = "Not installed"
     }
 
     /// The one source that needs no grant and has no app-installed question: it is read when the
@@ -62,6 +68,25 @@ final class SourcesModel {
         ),
     ]
 
+    /// The lookup service, which is not one of `all` on purpose.
+    ///
+    /// Every other source is read from this Mac; this one asks somebody else, which makes it the
+    /// only row whose switch sends a phone number off the machine. It is off until it is set up,
+    /// it is set up in Settings rather than in the wizard, and setup never shows it — a first run
+    /// should not put "send my contacts' numbers to a service" in front of someone who came here
+    /// to read their own chats.
+    static let lookup = Source(
+        id: LookupCollector.sourceId,
+        name: "Lookup",
+        appPaths: [],
+        fallbackSymbol: "antenna.radiowaves.left.and.right",
+        defaultsOn: false,
+        unavailableHelp: "No lookup service set up yet"
+    )
+
+    /// Every source Settings shows: the local four, then the one that isn't local.
+    static let allWithLookup: [Source] = all + [lookup]
+
     /// Full Disk Access, which is where Messages, WhatsApp and Mail are unlocked.
     static let privacySettingsURL = "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
 
@@ -95,11 +120,12 @@ final class SourcesModel {
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         var enabled: [String: Bool] = [:]
-        for source in SourcesModel.all {
-            // A key that was never written means "not answered yet", which is on: the toggles
-            // record what the user has turned *off*, and on a first run nothing has been.
+        for source in SourcesModel.allWithLookup {
+            // A key that was never written means "not answered yet", which for the local
+            // sources is on: those toggles record what the user has turned *off*, and on a
+            // first run nothing has been. Lookup starts off, because nobody has agreed to it.
             let key = SourcesModel.defaultsPrefix + source.id
-            enabled[source.id] = defaults.object(forKey: key) as? Bool ?? true
+            enabled[source.id] = defaults.object(forKey: key) as? Bool ?? source.defaultsOn
         }
         self.enabled = enabled
     }
@@ -107,7 +133,7 @@ final class SourcesModel {
     // MARK: - What the user allows
 
     func isEnabled(_ id: String) -> Bool {
-        enabled[id] ?? true
+        enabled[id] ?? SourcesModel.allWithLookup.first { $0.id == id }?.defaultsOn ?? true
     }
 
     /// Saves a switch the moment it is flipped. There is no "done" on a row of toggles, and the
@@ -132,7 +158,7 @@ final class SourcesModel {
     /// granted in System Settings — in another window entirely — and the rows have to catch up by
     /// themselves when the user comes back.
     func refresh() async {
-        let ids = SourcesModel.all.map(\.id)
+        let ids = SourcesModel.allWithLookup.map(\.id)
         let wantsNames = !readUserNames
         let result = await Task.detached {
             (
@@ -157,6 +183,11 @@ final class SourcesModel {
     nonisolated static func statuses(of ids: [String], userNames: [String]) -> [String: SourceStatus] {
         var result: [String: SourceStatus] = [:]
         for id in ids {
+            if id == LookupCollector.sourceId {
+                // Ready means "there is something to call": a service chosen and a key given.
+                result[id] = LookupSettings.isConfigured() ? .ready : .unavailable
+                continue
+            }
             result[id] = fileCollector(id, userNames: userNames)?.status() ?? .ready
         }
         return result
