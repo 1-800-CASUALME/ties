@@ -21,8 +21,9 @@ public struct MailCollector: SourceCollector {
 
     private let index: any MailIndex
     private let root: URL
-    /// Above this many `.emlx` files, the directory walk that stands in for a missing Spotlight
-    /// index is not attempted (`SpotlightMailIndex` applies the same ceiling).
+    /// Above this many `.emlx` files, the mailbox is not read by hand at all: the index that
+    /// stands in for a missing Spotlight index is not built, and an empty run means "we could
+    /// not look" rather than "no mail with this person".
     private let fallbackCeiling: Int
     /// What this run has concluded, and what it costs to find out — see `Session`.
     private let session = Session()
@@ -50,11 +51,12 @@ public struct MailCollector: SourceCollector {
 
     // MARK: - Session
 
-    /// Mail has no store to copy, so a session is only run-scoped bookkeeping: it clears the last
-    /// run's verdict and works out — once, rather than once per person — whether the mailbox is
-    /// small enough for a directory walk to stand in for a missing Spotlight index.
+    /// Mail has no store to copy, so a session is only run-scoped bookkeeping: it clears the
+    /// last run's verdict and reads the mailbox once — the walk whose absence made every person
+    /// with no Spotlight hit pay for one of their own (see `MailboxIndex`).
     public func beginSession() async throws {
-        session.begin(tooLarge: measureMailboxSize())
+        session.begin()
+        _ = directoryIndex()
         #if DEBUG
         visits.reset()
         #endif
@@ -135,8 +137,14 @@ public struct MailCollector: SourceCollector {
         var seen = Set<URL>()
         var messages: [EMLXMessage] = []
         for address in input.emails {
-            for url in try await index.messageURLs(involving: address, limit: Self.messageCap)
-            where seen.insert(url).inserted {
+            var urls = try await index.messageURLs(involving: address, limit: Self.messageCap)
+            if urls.isEmpty {
+                // Spotlight answering with nothing may mean the folder was never indexed, and
+                // the run's own reading of the mailbox is the only way to tell — from memory,
+                // however many people ask.
+                urls = directoryIndex()?.messageURLs(involving: address, limit: Self.messageCap) ?? []
+            }
+            for url in urls where seen.insert(url).inserted {
                 guard let data = try? Data(contentsOf: url), let message = try? EMLX.parse(data) else { continue }
                 #if DEBUG
                 visits.count()
@@ -149,17 +157,24 @@ public struct MailCollector: SourceCollector {
     }
 
     /// Whether the mailbox is past the ceiling above which a missing Spotlight index cannot be
-    /// stood in for by reading the files. Measured once per run — the walk visits up to
-    /// `fallbackCeiling + 1` files and the answer is about the mailbox, not about the person.
+    /// stood in for by reading the files — which is exactly the case where there is no index to
+    /// read from.
     private func mailboxIsTooLargeToWalk() -> Bool {
-        if let known = session.tooLarge { return known }
-        let measured = measureMailboxSize()
-        session.setTooLarge(measured)
-        return measured
+        directoryIndex() == nil
     }
 
-    private func measureMailboxSize() -> Bool {
-        DirectoryMailIndex.emlxFiles(in: root, limit: fallbackCeiling + 1).count > fallbackCeiling
+    /// The mailbox as this run read it. Built by `beginSession`, or on first use when the
+    /// collector is used without one; `nil` when the mailbox is past the ceiling.
+    private func directoryIndex() -> MailboxIndex? {
+        session.directory { buildDirectoryIndex() }
+    }
+
+    /// One walk of the mailbox, stopping one file past the ceiling: past it, reading the files
+    /// by hand costs more than the answer is worth and nothing is read at all.
+    private func buildDirectoryIndex() -> MailboxIndex? {
+        let files = DirectoryMailIndex.emlxFiles(in: root, limit: fallbackCeiling + 1)
+        guard files.count <= fallbackCeiling else { return nil }
+        return DirectoryMailIndex.index(of: files)
     }
 
     /// A `From` display name is an alias only when it isn't the name the Mac already has.
@@ -181,17 +196,37 @@ public struct MailCollector: SourceCollector {
     private final class Session: @unchecked Sendable {
         private let lock = NSLock()
         private var status: SourceStatus?
-        private var measured: Bool?
+        private var index: MailboxIndex?
+        private var read = false
+        private var reads = 0
 
         var outcome: SourceStatus? { lock.withLock { status } }
-        var tooLarge: Bool? { lock.withLock { measured } }
+        /// How many files the run's own reading of the mailbox covered, and how many times it
+        /// happened — one walk a run, however many people it answers for.
+        var indexedFileCount: Int { lock.withLock { index?.fileCount ?? 0 } }
+        var mailboxReads: Int { lock.withLock { reads } }
 
         /// Starts a run: the previous verdict goes, so a mailbox that has since been indexed
-        /// stops reporting the old complaint.
-        func begin(tooLarge: Bool) {
+        /// stops reporting the old complaint, and so does the mailbox the last run read.
+        func begin() {
             lock.withLock {
                 status = nil
-                measured = tooLarge
+                index = nil
+                read = false
+            }
+        }
+
+        /// The run's own reading of the mailbox, made by `build` the first time it is wanted.
+        /// The lock is held across the walk on purpose: the three people in flight during a run
+        /// would otherwise each start one of their own.
+        func directory(_ build: () -> MailboxIndex?) -> MailboxIndex? {
+            lock.withLock {
+                if !read {
+                    index = build()
+                    read = true
+                    reads += 1
+                }
+                return index
             }
         }
 
@@ -204,9 +239,6 @@ public struct MailCollector: SourceCollector {
             }
         }
 
-        func setTooLarge(_ value: Bool) {
-            lock.withLock { measured = value }
-        }
     }
 
     // MARK: - Test support
@@ -217,6 +249,11 @@ public struct MailCollector: SourceCollector {
     /// counting file system. Per collector and lock-protected, so neither tests running in
     /// parallel nor the three people in flight during a run disturb each other's count.
     public var lastVisited: Int { visits.value }
+
+    /// How many `.emlx` files this run's reading of the mailbox covered, and how many times the
+    /// mailbox was walked — the assertion behind "one walk a run, not one a person".
+    public var indexedFileCount: Int { session.indexedFileCount }
+    public var mailboxReads: Int { session.mailboxReads }
 
     private let visits = Visits()
 

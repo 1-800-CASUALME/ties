@@ -107,6 +107,50 @@ enum EMLXFixture {
         return root
     }
 
+    /// A mailbox holding `people` correspondents with `messagesEach` messages apiece, plus
+    /// `strangers` messages between people nobody in the address book knows — the noise a walk
+    /// has to read past, and whose bodies (a fat base64 attachment each) nothing may parse.
+    /// Returns the mailbox root and the correspondents' addresses, in order.
+    static func mailbox(people: Int, messagesEach: Int, strangers: Int) throws -> (root: URL, addresses: [String]) {
+        let root = try temporaryRoot()
+        let messages = root.appendingPathComponent("V10/INBOX.mbox/Messages", isDirectory: true)
+        try FileManager.default.createDirectory(at: messages, withIntermediateDirectories: true)
+
+        var addresses: [String] = []
+        for person in 0..<people {
+            let address = "p\(person)@example.com"
+            addresses.append(address)
+            for message in 0..<messagesEach {
+                let body = """
+                    From: P\(person) Example <\(address)>
+                    To: Asim <\(user)>
+                    Subject: Note \(message)
+                    Date: \(1 + message % 9) Sep 2026 09:00:00 +0300
+                    Content-Type: text/plain; charset=utf-8
+
+                    Note \(message) from p\(person).
+                    """
+                try write(body, named: "p\(person)-\(message).emlx", in: messages)
+            }
+        }
+
+        let attachment = String(repeating: "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVowMTIzNDU2Nzg5\n", count: 4_000)
+        for stranger in 0..<strangers {
+            let body = """
+                From: Stranger \(stranger) <stranger\(stranger)@elsewhere.test>
+                To: Someone Else <else\(stranger)@elsewhere.test>
+                Subject: Nothing to do with anyone
+                Date: 2 Sep 2026 09:00:00 +0300
+                Content-Type: application/pdf; name="big.pdf"
+                Content-Transfer-Encoding: base64
+
+                \(attachment)
+                """
+            try write(body, named: "stranger-\(stranger).emlx", in: messages)
+        }
+        return (root, addresses)
+    }
+
     /// A mailbox of `count` plain messages from the person, one per day going back from
     /// 2026-09-10, for the 50-per-address cap.
     static func mailbox(messageCount count: Int) throws -> URL {

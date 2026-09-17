@@ -212,14 +212,78 @@ private struct EmptyMailIndex: MailIndex {
     #expect(collector.status() == .ready)
 }
 
-@Test func spotlightFallsBackToTheDirectoryWhenItFindsNothing() async throws {
+@Test func aSpotlightMissFallsBackToTheMailboxTheRunRead() async throws {
     let root = try EMLXFixture.mailbox()
     defer { try? FileManager.default.removeItem(at: root) }
 
-    // A temp directory is not indexed, so the query times out empty and the directory walk answers.
-    let index = SpotlightMailIndex(root: root, timeout: 0.2)
-    let urls = try await index.messageURLs(involving: EMLXFixture.person, limit: 50)
+    // A temp directory is not indexed, so the query times out empty — which is indistinguishable
+    // from "she has no mail", and is why the run reads the mailbox for itself.
+    let collector = MailCollector(index: SpotlightMailIndex(root: root, timeout: 0.2), root: root)
+    try await collector.beginSession()
+    let signals = try await collector.collect(
+        for: input(name: ("Sara", "Ahmed"), emails: [EMLXFixture.person]),
+        since: nil
+    )
 
-    #expect(urls.count == 3)
-    #expect(urls.first?.lastPathComponent == "3.emlx")
+    #expect(signals.interactions == 3)
+    #expect(signals.titles == ["Senior Product Manager"])
+    #expect(collector.mailboxReads == 1)
+}
+
+@Test func theMailboxIsReadOncePerRunAndOnlyMatchingBodiesAreParsed() async throws {
+    let (root, addresses) = try EMLXFixture.mailbox(people: 50, messagesEach: 2, strangers: 100)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    // Spotlight has nothing to say about any of them, which is the case the old code answered
+    // with a whole mailbox walk-and-MIME-parse per person per address.
+    let collector = MailCollector(index: EmptyMailIndex(), root: root)
+    try await collector.beginSession()
+
+    for (index, address) in addresses.enumerated() {
+        let signals = try await collector.collect(
+            for: input(name: ("P\(index)", "Example"), emails: [address]),
+            since: nil
+        )
+        #expect(signals.sources == ["mail"])
+        #expect(signals.interactions == 2)
+    }
+
+    // One walk for the whole run, covering every file in the mailbox...
+    #expect(collector.mailboxReads == 1)
+    #expect(collector.indexedFileCount == 200)
+    // ...and the only bodies opened are the hundred that are actually theirs. The hundred
+    // strangers' messages were decided on their headers; their attachments were never read.
+    #expect(collector.lastVisited == 100)
+}
+
+@Test func theDirectoryIndexDecidesOnHeadersAndOrdersNewestFirst() async throws {
+    let root = try EMLXFixture.mailbox()
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    // A message whose body is an attachment nothing can read still indexes: only its `From`,
+    // `To`/`Cc` and `Date` are looked at.
+    let messages = root.appendingPathComponent("V10/INBOX.mbox/Messages", isDirectory: true)
+    try EMLXFixture.write("""
+        From: Sara Ahmed <\(EMLXFixture.person)>
+        To: Asim <\(EMLXFixture.user)>
+        Subject: Scan
+        Date: Thu, 3 Sep 2026 08:00:00 +0300
+        Content-Type: application/octet-stream
+        Content-Transfer-Encoding: base64
+
+        \(String(repeating: "%%%\u{0}\u{1}", count: 100))
+        """, named: "4.emlx", in: messages)
+
+    let index = DirectoryMailIndex(root: root)
+    let urls = try await index.messageURLs(involving: EMLXFixture.person, limit: 50)
+    #expect(urls.count == 4)
+    #expect(urls.first?.lastPathComponent == "4.emlx")
+
+    // The limit is applied to the index, so it is the newest messages that are kept — and the
+    // ones dropped are never opened again.
+    let capped = try await index.messageURLs(involving: EMLXFixture.person, limit: 2)
+    #expect(capped.map(\.lastPathComponent) == ["4.emlx", "3.emlx"])
+
+    // Cc counts as involvement, and an address nobody wrote to has no messages at all.
+    #expect(try await index.messageURLs(involving: "nobody@example.com", limit: 50).isEmpty)
 }

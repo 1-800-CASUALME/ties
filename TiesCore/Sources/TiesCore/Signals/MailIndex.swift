@@ -7,12 +7,17 @@ public protocol MailIndex: Sendable {
 
 /// Asks Spotlight, which has already indexed every message Mail has downloaded — reading the
 /// mailbox itself would mean parsing tens of thousands of files.
+///
+/// An empty answer is not a verdict: Spotlight cannot tell "this person has no mail" from "this
+/// folder was never indexed". Standing in for the second is `MailCollector`'s job, not this
+/// type's, because the stand-in is a whole-mailbox read that has to happen once for a run
+/// rather than once for every address it is asked about.
 public struct SpotlightMailIndex: MailIndex {
-    /// How long Spotlight gets to answer before the directory walk takes over.
+    /// How long Spotlight gets to answer before the run gives up on it.
     static let defaultTimeout: TimeInterval = 5
-    /// Walking more `.emlx` files than this by hand costs more than the answer is worth.
-    /// `MailCollector` applies the same ceiling when deciding whether an empty run means "no
-    /// mail with this person" or "we could not look".
+    /// Reading more `.emlx` files than this by hand costs more than the answer is worth.
+    /// `MailCollector` applies this ceiling when deciding whether to build the directory index
+    /// that stands in for a missing Spotlight index at all.
     public static let directoryFallbackLimit = 5_000
 
     public let root: URL
@@ -29,13 +34,7 @@ public struct SpotlightMailIndex: MailIndex {
 
     public func messageURLs(involving address: String, limit: Int) async throws -> [URL] {
         let found = await Self.spotlightURLs(address: address, root: root, timeout: timeout)
-        if !found.isEmpty { return Array(found.prefix(limit)) }
-
-        // Nothing came back in time: either Spotlight has no index for this folder, or it is
-        // still gathering. Reading the mailbox by hand is only affordable when it is small.
-        let files = DirectoryMailIndex.emlxFiles(in: root, limit: Self.directoryFallbackLimit + 1)
-        guard files.count <= Self.directoryFallbackLimit else { return [] }
-        return try await DirectoryMailIndex(root: root).messageURLs(involving: address, limit: limit)
+        return Array(found.prefix(limit))
     }
 
     // MARK: - The query
@@ -104,8 +103,13 @@ public struct SpotlightMailIndex: MailIndex {
 }
 
 /// Walks a mailbox directory and reads the headers itself. The test double for
-/// `SpotlightMailIndex`, and its fallback on a small mailbox Spotlight has not indexed.
+/// `SpotlightMailIndex`, and the source of the whole-mailbox index that stands in for it.
 public struct DirectoryMailIndex: MailIndex {
+    /// How much of a `.emlx` file is read to find its header block: Mail's byte-count line plus
+    /// the headers. A message whose headers run past this has a `Received` chain no signal is
+    /// ever read out of.
+    static let headerBytes = 64 * 1024
+
     public let root: URL
 
     public init(root: URL) {
@@ -113,16 +117,10 @@ public struct DirectoryMailIndex: MailIndex {
     }
 
     public func messageURLs(involving address: String, limit: Int) async throws -> [URL] {
-        let wanted = address.lowercased()
-        var dated: [(url: URL, date: Date)] = []
-        for url in Self.emlxFiles(in: root, limit: .max) {
-            guard let data = try? Data(contentsOf: url) else { continue }
-            guard let message = try? EMLX.parse(data) else { continue }
-            guard message.from?.address == wanted || message.to.contains(wanted) else { continue }
-            dated.append((url, message.date ?? .distantPast))
-        }
-        return dated.sorted { $0.date > $1.date }.prefix(limit).map(\.url)
+        Self.index(of: Self.emlxFiles(in: root, limit: .max)).messageURLs(involving: address, limit: limit)
     }
+
+    // MARK: - Reading the mailbox
 
     /// Every `.emlx` file under `root`, stopping after `limit` of them.
     static func emlxFiles(in root: URL, limit: Int) -> [URL] {
@@ -138,5 +136,87 @@ public struct DirectoryMailIndex: MailIndex {
             if found.count >= limit { break }
         }
         return found
+    }
+
+    /// Reads the headers of `files` and indexes them by every address each message involves,
+    /// newest first.
+    static func index(of files: [URL]) -> MailboxIndex {
+        var dated: [String: [(url: URL, date: Date)]] = [:]
+        for url in files {
+            guard let header = headers(of: url) else { continue }
+            for address in header.addresses {
+                dated[address, default: []].append((url, header.date))
+            }
+        }
+        let byAddress = dated.mapValues { messages in
+            messages.sorted { $0.date > $1.date }.map(\.url)
+        }
+        return MailboxIndex(messagesByAddress: byAddress, fileCount: files.count)
+    }
+
+    /// Every address one message involves — its `From`, `To` and `Cc` — and when it was sent,
+    /// read from the head of the file and nothing else.
+    ///
+    /// Whether a message involves an address is a question about four header fields. Parsing
+    /// the body to answer it meant decoding base64 attachments and stripping HTML for every
+    /// message in the mailbox, which is what made reading the mailbox unaffordable; the body is
+    /// read later, by `MailCollector`, for the fifty messages that turn out to be the person's.
+    static func headers(of url: URL) -> (addresses: Set<String>, date: Date)? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        guard let head = try? handle.read(upToCount: headerBytes), !head.isEmpty else { return nil }
+
+        // The byte-count line Mail writes first is not part of the message.
+        guard let firstNewline = head.firstIndex(of: 0x0A) else { return nil }
+        let fields = EMLX.Headers(headerBlock(of: head[head.index(after: firstNewline)...]))
+
+        var addresses = Set<String>()
+        for list in fields.values("from") + fields.values("to") + fields.values("cc") {
+            addresses.formUnion(EMLX.addresses(in: list).map(\.address))
+        }
+        guard !addresses.isEmpty else { return nil }
+        return (addresses, fields.value("date").flatMap(EMLX.date(from:)) ?? .distantPast)
+    }
+
+    /// Everything up to the blank line that ends the headers — or the whole slice when the read
+    /// prefix stopped short of one.
+    private static func headerBlock(of data: Data.SubSequence) -> Data {
+        var index = data.startIndex
+        while let newline = data[index...].firstIndex(of: 0x0A) {
+            let afterNewline = data.index(after: newline)
+            guard afterNewline < data.endIndex else { break }
+            if data[afterNewline] == 0x0A {
+                return Data(data[data.startIndex..<newline])
+            }
+            if data[afterNewline] == 0x0D {
+                let third = data.index(after: afterNewline)
+                if third < data.endIndex, data[third] == 0x0A {
+                    return Data(data[data.startIndex..<newline])
+                }
+            }
+            index = afterNewline
+        }
+        return Data(data)
+    }
+}
+
+/// A mailbox read once: every address it holds mapped to the messages that address took part
+/// in, newest first.
+///
+/// This is what stands in for a Spotlight index that isn't there. A Spotlight miss looks exactly
+/// like "this person has no mail" — which is the common case — so the stand-in is reached for
+/// most of an address book, and walking and parsing the mailbox again for each of them was
+/// `people × addresses × mailbox size` file reads. Built once per collection run instead
+/// (`MailCollector.beginSession`), it answers each of them from memory.
+public struct MailboxIndex: Sendable {
+    static let empty = MailboxIndex(messagesByAddress: [:], fileCount: 0)
+
+    /// Lowercased address -> the messages it took part in, newest first.
+    let messagesByAddress: [String: [URL]]
+    /// How many files were walked to build it.
+    let fileCount: Int
+
+    public func messageURLs(involving address: String, limit: Int) -> [URL] {
+        Array((messagesByAddress[address.lowercased()] ?? []).prefix(limit))
     }
 }
